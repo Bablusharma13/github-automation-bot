@@ -316,6 +316,49 @@ describe("GET /api/auth/github/callback", () => {
     expect(rows[0]!.githubLogin).toBe("new-name");
   });
 
+  it("stores expiring tokens (8h access + refresh token) encrypted, with expiry times", async () => {
+    mockFetch({
+      [TOKEN_URL]: () =>
+        json({
+          access_token: "ghu_expiring_access",
+          token_type: "bearer",
+          scope: "public_repo,read:user,user:email",
+          expires_in: 28_800,
+          refresh_token: "ghr_refresh_value",
+          refresh_token_expires_in: 15_897_600,
+        }),
+      [USER_URL]: () =>
+        json({
+          id: 1111,
+          login: "expiring-user",
+          name: null,
+          email: "e@example.com",
+          avatar_url: "https://avatars.githubusercontent.com/u/1111",
+        }),
+    });
+    const s = await start();
+    const res = await handleGitHubCallback(
+      callbackRequest(`code=good&state=${s.state}`, { [oauthCookieName(env)]: s.cookieValue }),
+      deps,
+    );
+    expect(res.status).toBe(303);
+    const [row] = await db.select().from(users).where(eq(users.githubUserId, 1111));
+    expect(row!.refreshTokenEnc).not.toContain("ghr_refresh_value");
+    expect(decryptSecret(row!.refreshTokenEnc!, env.TOKEN_ENCRYPTION_KEY)).toBe("ghr_refresh_value");
+    const accessHours = (row!.accessTokenExpiresAt!.getTime() - Date.now()) / 3_600_000;
+    expect(accessHours).toBeGreaterThan(7.9);
+    const refreshDays = (row!.refreshTokenExpiresAt!.getTime() - Date.now()) / 86_400_000;
+    expect(refreshDays).toBeGreaterThan(180);
+  });
+
+  it("clears a pending re-authentication flag when the user signs in again", async () => {
+    await login({ githubId: 1212 });
+    await db.update(users).set({ githubReauthRequiredAt: new Date() }).where(eq(users.githubUserId, 1212));
+    await login({ githubId: 1212 });
+    const [row] = await db.select().from(users).where(eq(users.githubUserId, 1212));
+    expect(row!.githubReauthRequiredAt).toBeNull();
+  });
+
   it("falls back to the primary verified email when the profile email is private", async () => {
     await login({ githubId: 3003, email: null });
     const [row] = await db.select().from(users).where(eq(users.githubUserId, 3003));

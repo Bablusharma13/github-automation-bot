@@ -146,6 +146,19 @@ does not yield usable cookies. Fixed 7-day expiry. Cookie: `HttpOnly`, `SameSite
 `Path=/`; when `APP_URL` is HTTPS (enforced in production) it is `Secure` and named
 `__Host-session`, which pins it to this exact origin.
 
+GitHub tokens: new OAuth apps default to "Expire user access tokens" (access token 8h,
+refresh token 6 months, rotated on every use). Both tokens and their expiry times are
+stored encrypted. Background work calls `getUserAccessToken()`, which refreshes a token
+within 5 minutes of expiry. Because a used refresh token (and the old access token) stop
+working immediately, the refresh runs under `SELECT ... FOR UPDATE` on the user row and
+re-checks expiry after acquiring the lock, so concurrent workers produce exactly one
+refresh. `bad_refresh_token` or an expired refresh token sets
+`users.github_reauth_required_at`; automation for that user then fails fast with a clear
+"sign in again" error instead of retrying. Network/5xx failures leave the stored tokens
+untouched and are retryable. Signing in again clears the flag. Known edge: if GitHub
+rotates the tokens but the database commit then fails, the new refresh token is lost and
+the user must sign in again.
+
 Auth checks run in pages (`requireUser()`) and in each API route — not in layouts, which
 do not re-render on client navigation. Mutating API requests additionally require a
 same-origin `Origin` header.

@@ -18,6 +18,8 @@ export class OAuthError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    /** Transient (network, GitHub 5xx) vs. permanent (rejected code/refresh token, bad config). */
+    readonly retryable = false,
     options?: { cause?: unknown },
   ) {
     super(message, options);
@@ -56,20 +58,29 @@ const tokenResponseSchema = z.object({
   access_token: z.string().min(1),
   token_type: z.string(),
   scope: z.string().default(""),
+  // Present only when the app has "Expire user access tokens" enabled (GitHub's default
+  // for new OAuth apps): access token 8h, refresh token 6 months.
+  expires_in: z.number().int().positive().optional(),
+  refresh_token: z.string().min(1).optional(),
+  refresh_token_expires_in: z.number().int().positive().optional(),
 });
 
+export type TokenSet = {
+  accessToken: string;
+  /** Empty on refresh responses; callers keep the previously granted scopes. */
+  scopes: string[];
+  accessTokenExpiresAt: Date | null;
+  refreshToken: string | null;
+  refreshTokenExpiresAt: Date | null;
+};
+
 /**
- * Exchanges the authorization code. GitHub reports failures such as
- * `bad_verification_code` in the JSON body, so the body is always validated rather than
- * trusting the HTTP status.
+ * POSTs to GitHub's token endpoint (used for both code exchange and refresh). GitHub
+ * reports failures such as `bad_verification_code` / `bad_refresh_token` in the JSON
+ * body, so the body is always validated rather than trusting the HTTP status.
  */
-export async function exchangeCodeForToken(params: {
-  clientId: string;
-  clientSecret: string;
-  code: string;
-  codeVerifier: string;
-  redirectUri: string;
-}): Promise<{ accessToken: string; scopes: string[] }> {
+async function requestToken(form: Record<string, string>, purpose: string): Promise<TokenSet> {
+  const requestedAt = Date.now();
   let res: Response;
   try {
     res = await fetch(TOKEN_URL, {
@@ -79,20 +90,12 @@ export async function exchangeCodeForToken(params: {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": USER_AGENT,
       },
-      body: new URLSearchParams({
-        client_id: params.clientId,
-        client_secret: params.clientSecret,
-        code: params.code,
-        redirect_uri: params.redirectUri,
-        code_verifier: params.codeVerifier,
-      }),
+      body: new URLSearchParams(form),
       signal: AbortSignal.timeout(10_000),
       cache: "no-store",
     });
   } catch (err) {
-    throw new OAuthError("network_error", "Could not reach GitHub to exchange the authorization code", {
-      cause: err,
-    });
+    throw new OAuthError("network_error", `Could not reach GitHub for ${purpose}`, true, { cause: err });
   }
 
   const body: unknown = await res.json().catch(() => null);
@@ -100,18 +103,62 @@ export async function exchangeCodeForToken(params: {
     // Error codes/descriptions are GitHub's public documentation strings, safe to log.
     const description =
       "error_description" in body && typeof body.error_description === "string" ? body.error_description : "";
-    throw new OAuthError(body.error, `Token exchange rejected: ${body.error} ${description}`.trim());
+    throw new OAuthError(body.error, `GitHub rejected ${purpose}: ${body.error} ${description}`.trim());
   }
-  if (!res.ok) throw new OAuthError("http_error", `Token exchange failed with HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new OAuthError("http_error", `GitHub ${purpose} failed with HTTP ${res.status}`, res.status >= 500);
+  }
 
   const parsed = tokenResponseSchema.safeParse(body);
   if (!parsed.success || parsed.data.token_type.toLowerCase() !== "bearer") {
-    throw new OAuthError("invalid_response", "Token exchange returned an unexpected response");
+    throw new OAuthError("invalid_response", `GitHub ${purpose} returned an unexpected response`);
   }
+  const t = parsed.data;
+  // Measure expiry from when we sent the request, so clock drift errs on the early side.
+  const at = (seconds: number | undefined) => (seconds ? new Date(requestedAt + seconds * 1000) : null);
   return {
-    accessToken: parsed.data.access_token,
-    scopes: parsed.data.scope.split(/[,\s]+/).filter(Boolean),
+    accessToken: t.access_token,
+    scopes: t.scope.split(/[,\s]+/).filter(Boolean),
+    accessTokenExpiresAt: at(t.expires_in),
+    refreshToken: t.refresh_token ?? null,
+    refreshTokenExpiresAt: at(t.refresh_token_expires_in),
   };
+}
+
+export function exchangeCodeForToken(params: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+}): Promise<TokenSet> {
+  return requestToken(
+    {
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      code: params.code,
+      redirect_uri: params.redirectUri,
+      code_verifier: params.codeVerifier,
+    },
+    "the authorization code exchange",
+  );
+}
+
+/** Rotates tokens: after this call the old refresh token AND old access token stop working. */
+export function refreshAccessToken(params: {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}): Promise<TokenSet> {
+  return requestToken(
+    {
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: params.refreshToken,
+    },
+    "the token refresh",
+  );
 }
 
 const githubUserSchema = z.object({

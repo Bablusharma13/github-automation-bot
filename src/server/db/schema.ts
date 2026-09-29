@@ -52,6 +52,16 @@ export const users = pgTable("users", {
   avatarUrl: text("avatar_url"),
   /** AES-256-GCM encrypted OAuth access token. Never leaves the server. */
   accessTokenEnc: text("access_token_enc").notNull(),
+  /** Null when the OAuth app issues non-expiring tokens. GitHub's expiring tokens last 8h. */
+  accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+  /** Encrypted refresh token (rotated on every refresh; lasts 6 months). */
+  refreshTokenEnc: text("refresh_token_enc"),
+  refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+  /**
+   * Set when GitHub rejects our credentials (revoked or expired refresh token). Background
+   * automation for this user fails fast with a clear reason until they sign in again.
+   */
+  githubReauthRequiredAt: timestamp("github_reauth_required_at", { withTimezone: true }),
   tokenScopes: text("token_scopes"),
   /** Optional per-user Slack Incoming Webhook URL (encrypted). Falls back to SLACK_WEBHOOK_URL. */
   slackWebhookUrlEnc: text("slack_webhook_url_enc"),
