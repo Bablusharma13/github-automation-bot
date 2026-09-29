@@ -123,17 +123,32 @@ drizzle-kit. Tables:
 
 GitHub OAuth App, authorization-code flow:
 
-1. `GET /api/auth/github` generates `state` and a PKCE `code_verifier`, stores both in a
-   short-lived HttpOnly cookie, redirects to `https://github.com/login/oauth/authorize`
-   with `code_challenge` (S256).
-2. `GET /api/auth/github/callback` checks `state` (timing-safe), exchanges the code with
-   the `code_verifier`, fetches `/user`, upserts the user, stores the access token
-   encrypted (AES-256-GCM), creates a session, sets the session cookie, redirects to
-   `/dashboard`.
-3. `POST /api/auth/logout` deletes the session row and clears the cookie.
+1. `GET /api/auth/github` (rate limited per IP) generates `state` and a PKCE
+   `code_verifier`, stores both in one HttpOnly cookie (`SameSite=Lax`,
+   `Path=/api/auth/github`, 10 min — GitHub codes expire after 10 minutes), redirects to
+   `https://github.com/login/oauth/authorize` with `code_challenge` (S256).
+2. `GET /api/auth/github/callback` (rate limited) handles GitHub-reported errors
+   (`access_denied`, ...), checks `state` against the cookie (timing-safe), exchanges the
+   code with the `code_verifier` server-side, fetches `/user` (and the primary verified
+   email if the profile email is private), upserts the user, stores the access token
+   encrypted (AES-256-GCM), invalidates the browser's previous session, creates a new
+   session, clears the OAuth cookie, and redirects to `/dashboard`. Every failure
+   redirects to `/login?error=<code>` with a fixed set of codes (no input is reflected).
+   The token endpoint reports errors such as `bad_verification_code` in the JSON body, so
+   the body is schema-validated instead of trusting the HTTP status.
+3. `POST /api/auth/logout` (same-origin `Origin` required) deletes the session row and
+   clears the cookie.
+4. `GET /api/auth/me` returns the session user DTO
+   (`id, githubLogin, name, email, avatarUrl`) or 401.
 
-Session cookie: `HttpOnly`, `SameSite=Lax`, `Secure` in production, `Path=/`, 7-day expiry.
-Mutating API requests additionally require a same-origin `Origin` header.
+Sessions: 32 random bytes in the cookie; only the SHA-256 is stored, so a database leak
+does not yield usable cookies. Fixed 7-day expiry. Cookie: `HttpOnly`, `SameSite=Lax`,
+`Path=/`; when `APP_URL` is HTTPS (enforced in production) it is `Secure` and named
+`__Host-session`, which pins it to this exact origin.
+
+Auth checks run in pages (`requireUser()`) and in each API route — not in layouts, which
+do not re-render on client navigation. Mutating API requests additionally require a
+same-origin `Origin` header.
 
 Requested scopes: `read:user user:email public_repo`. `public_repo` is the least privilege
 that allows creating repository webhooks and writing labels/comments on **public**
@@ -216,8 +231,10 @@ evaluated at processing time, and each matching rule produces one automation run
 
 A thin typed wrapper around `fetch` against `https://api.github.com`, using the
 connecting user's OAuth token (so writes appear as that user). Every call sets
-`Accept: application/vnd.github+json` and `X-GitHub-Api-Version`, and raises a typed
-`GitHubApiError` carrying status and whether it is retryable.
+`Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2026-03-10` (latest
+supported version; its breaking changes only remove fields this app does not read) and a
+10s timeout, and raises a typed `GitHubApiError` carrying status and whether it is
+retryable (network/timeout, 5xx, 429 and 403-rate-limit are; other 4xx are not).
 
 ### Slack
 
