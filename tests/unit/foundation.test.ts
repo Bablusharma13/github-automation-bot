@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret, safeEqual } from "@/server/crypto";
-import { __test__ as loggerInternals } from "@/server/logger";
+import { __test__ as loggerInternals, serializeError } from "@/server/logger";
 
 const KEY = Buffer.alloc(32, 1).toString("base64");
 
@@ -54,5 +54,28 @@ describe("logger redaction", () => {
     expect((out.nested as Record<string, unknown>).ok).toBe(1);
     expect((out.headers as Record<string, unknown>).authorization).toBe("[REDACTED]");
     expect((out.headers as Record<string, unknown>).cookie).toBe("[REDACTED]");
+  });
+});
+
+describe("serializeError", () => {
+  it("drops Drizzle query parameters but keeps the driver cause", () => {
+    const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
+    const err = new Error(
+      'Failed query: insert into "rate_limits" values ($1)\nparams: auth_start:198.51.100.7',
+      {
+        cause,
+      },
+    );
+    const out = serializeError(err);
+    const text = JSON.stringify(out);
+    expect(out.message).toBe('Failed query: insert into "rate_limits" values ($1)');
+    expect(text).not.toContain("198.51.100.7");
+    expect(out.cause).toMatchObject({ code: "ECONNREFUSED", message: "connect ECONNREFUSED 127.0.0.1:5432" });
+  });
+
+  it("does not over-redact descriptive keys that merely mention cookies", () => {
+    const out = loggerInternals.redact({ hadCookie: true, cookie: "session=abc" }) as Record<string, unknown>;
+    expect(out.hadCookie).toBe(true);
+    expect(out.cookie).toBe("[REDACTED]");
   });
 });
