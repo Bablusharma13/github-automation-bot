@@ -17,7 +17,9 @@ type Deps = AuthDeps | (() => AuthDeps);
 const noStore = { "Cache-Control": "no-store" };
 
 // GitHub owner: alphanumerics and single hyphens (≤39); repo: alphanumerics, '.', '-', '_' (≤100).
-const connectSchema = z.object({
+// Strict: the repository's id, owner and permissions always come from GitHub, so any other
+// field (e.g. a client-supplied githubRepoId or userId) is rejected rather than ignored.
+const connectSchema = z.strictObject({
   fullName: z
     .string()
     .trim()

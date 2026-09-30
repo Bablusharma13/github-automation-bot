@@ -266,6 +266,24 @@ describe("POST /api/repositories (connect)", () => {
     expect(crossSite.status).toBe(403);
     expect(gh.calls).toHaveLength(0);
   });
+
+  it("rejects client-supplied ids instead of ignoring them, before calling GitHub", async () => {
+    const u = await createSignedInUser(db, env, "extra-fields-user");
+    const other = await createSignedInUser(db, env, "extra-fields-other");
+    const gh = mockFetch({});
+    for (const extra of [{ githubRepoId: 123 }, { userId: other.user.id }, { webhookId: 9 }]) {
+      const res = await connectRepositoryHandler(
+        apiRequest(env, "POST", "/api/repositories", {
+          cookie: u.cookie,
+          body: { fullName: "extra-fields-user/sandbox", ...extra },
+        }),
+        deps,
+      );
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(gh.calls).toHaveLength(0);
+    expect(await db.select().from(repositories).where(eq(repositories.userId, u.user.id))).toHaveLength(0);
+  });
 });
 
 describe("authorization: users only ever see and change their own repositories", () => {
