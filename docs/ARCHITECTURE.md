@@ -239,31 +239,57 @@ database write failed (never a 2xx for something we did not store).
 ### Reliable processing
 
 The event row and its job row are written in the same transaction, so an acknowledged
-event always has a job (transactional outbox). Processing is triggered by:
+event always has a job (transactional outbox). `drainJobs()` (`src/server/jobs/worker.ts`)
+processes due jobs until a time budget runs out; it is triggered by:
 
-1. `after()` in the webhook route — runs right after the 202 response (Vercel `waitUntil`).
-2. `GET /api/cron/worker` protected by `CRON_SECRET`, called by a GitHub Actions
-   scheduled workflow (every ~5 min, best-effort timing) and a daily Vercel cron backstop.
-3. A manual "Retry" action in the dashboard (owner-checked).
-4. `npm run worker` locally.
+1. `after()` in the webhook route, right after the 202 response (Vercel `waitUntil`),
+   with a 50s budget (`maxDuration = 60`). It also waits for its _own_ short retries
+   within that budget, so a transient error is retried within seconds.
+2. `GET /api/cron/worker`, protected by `Authorization: Bearer $CRON_SECRET`
+   (constant-time compare), called by the GitHub Actions workflow
+   `.github/workflows/worker-sweep.yml` every ~5 minutes (best-effort timing) and by a daily
+   Vercel cron (`vercel.json`). It also purges expired sessions and stale rate-limit rows,
+   and returns counts only (its output lands in public workflow logs).
+3. A manual "Retry" action in the dashboard (planned, owner-checked).
 
-Correctness never depends on the trigger: all state is in Postgres, and any trigger just
-drains due jobs.
+Correctness never depends on the trigger: all state is in Postgres, and every trigger
+just drains whatever is due.
 
-Claiming uses `SELECT ... FOR UPDATE SKIP LOCKED` inside an `UPDATE ... RETURNING`, and sets
-a lease (`locked_until`). If a function is killed mid-job, the lease expires and the job
-is claimed again. Attempts are counted on claim, so a job that keeps crashing still hits
-`max_attempts`.
+Queue mechanics (`src/server/jobs/queue.ts`):
 
-Backoff: exponential with jitter (base 30s, capped), max 6 attempts. Short delays can be
-picked up by the same `after()` drain loop while it still has time budget; longer ones by
-the sweeper.
+- **Claim**: `UPDATE jobs … WHERE id IN (SELECT id … FOR UPDATE SKIP LOCKED) RETURNING *`
+  takes pending jobs whose `run_at` passed and running jobs whose lease expired;
+  concurrent workers get disjoint jobs. The claim sets a 120s lease (`locked_until`) and
+  increments `attempts`, so a job that keeps crashing its worker still runs out of attempts.
+- **Fencing**: completing, rescheduling or failing a job requires
+  `(id, status = running, attempts = <claimed value>)`. A worker whose lease expired and
+  was re-claimed updates zero rows instead of overwriting the new owner's state.
+- **Retry**: transient failures reschedule with exponential backoff and ±20% jitter
+  (~30s, 60s, 2m, 4m, 8m; capped at 1h), `max_attempts = 6`. On the final attempt a
+  transient failure is recorded as a permanent one ("gave up after N attempts").
+- **Recovery**: a job whose worker died during its final attempt can never be claimed
+  again; `reapAbandonedJobs()` marks it failed, and `abandonEvent()` marks the event and
+  every unfinished step failed with the reason — nothing stays "processing" forever.
 
-Step idempotency inside a job:
+Processing an event (`processEvent()` in `src/server/automation/process-event.ts`) is
+safe to repeat:
 
-- `automation_runs` is UNIQUE per (event, rule); re-running a job reuses the row.
-- Each step records its own status. Succeeded steps are skipped on retry, so a Slack
-  failure never repeats or erases a successful GitHub action.
+- Matching rules are evaluated and one `automation_runs` row per (event, rule) is inserted
+  with `ON CONFLICT DO NOTHING` (UNIQUE index), so a retried job reuses its runs. The run
+  snapshots the rule's name, action and value, so editing or deleting a rule later does
+  not change history.
+- Each run has two steps with their own persisted status and attempt counters: GitHub
+  write-back, then Slack. A step that succeeded is never executed again, so a Slack
+  failure cannot repeat or undo the GitHub action. Slack runs only once the GitHub step is
+  terminal, so the notification reports the real outcome — including failures.
+- Error classification: an error's `retryable` flag decides (GitHub network/timeout, 5xx,
+  429 and rate-limit 403 are retryable; other 4xx and a revoked authorization are not).
+  Errors without the flag are treated as transient.
+- A finished event (`processed`/`ignored`) is a no-op, and an event whose repository was
+  disconnected before processing is marked `ignored` (`repository_disconnected`).
+
+Step idempotency inside the executors (GitHub/Slack):
+
 - **Add label**: reads current labels on the issue/PR first; if the label is present the
   step succeeds without a write.
 - **Comment**: the body carries a hidden marker `<!-- automation-bot:run:<run id> -->`.
@@ -271,8 +297,6 @@ Step idempotency inside a job:
 - **Slack**: incoming webhooks have no idempotency key, so Slack delivery is
   at-least-once in the narrow window where a POST succeeds but the process dies before
   recording it. Status is written immediately after the POST to keep that window small.
-- Errors are classified: network errors, 5xx and 429 are retryable; other 4xx (e.g. label
-  does not exist → 422, missing permission → 403/404) fail fast with a readable message.
 
 ### Rule engine
 

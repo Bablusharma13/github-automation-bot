@@ -1,0 +1,39 @@
+# Frequent sweeper for the job queue. Vercel Hobby cron runs at most once a day, so this
+# schedule picks up retries whose backoff has elapsed and jobs whose worker died.
+# Timing is best-effort (GitHub may delay scheduled runs); correctness does not depend on
+# it because all job state lives in Postgres.
+#
+# Requires the repository secret CRON_SECRET (same value as the Vercel env var). Without
+# it the workflow only prints a warning. HTTP errors from the sweeper fail the run.
+name: Worker sweep
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: worker-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Drain due jobs
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          APP_URL: https://github-automation-bot-seven.vercel.app
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            # A setup step, not an outage: warn visibly instead of failing (and emailing)
+            # every five minutes until the secret is added.
+            echo "::warning::The CRON_SECRET repository secret is not set; skipping the sweep."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error --max-time 90 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$APP_URL/api/cron/worker"
