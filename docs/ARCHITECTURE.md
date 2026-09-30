@@ -300,10 +300,29 @@ Step idempotency inside the executors (GitHub/Slack):
 
 ### Rule engine
 
-A rule belongs to a repository and matches on: event type (`issues` / `pull_request`),
-the event's `action` (e.g. `opened`), and optional case-insensitive keywords (any match)
-against title/body. Actions: `add_label` or `add_comment`, plus a Slack toggle. Rules are
-evaluated at processing time, and each matching rule produces one automation run.
+A rule belongs to one of the user's connected repositories and matches on: event type
+(`issues` / `pull_request`), the event's `action` (`opened`, `edited`, `reopened`; one or
+more), and optional keywords — case-insensitive substring match, ANY keyword, against the
+title or the title + body. No keywords = every event of that type/action. Actions:
+`add_label` (label name ≤ 50 characters, GitHub's limit) or `add_comment` (≤ 2,000
+characters), plus a Slack toggle. Evaluation is a pure function (`ruleMatchesEvent`) run
+at processing time; each matching rule produces one automation run.
+
+API (all through `withUser()`, every query scoped by the session user's id):
+
+| Method               | Path                         | Notes                                                                         |
+| -------------------- | ---------------------------- | ----------------------------------------------------------------------------- |
+| GET                  | `/api/rules[?repositoryId=]` | the caller's rules, with repository name and connection state                 |
+| POST                 | `/api/rules`                 | `repositoryId` must be one of the caller's **active** repositories (else 404) |
+| GET / PATCH / DELETE | `/api/rules/:id`             | another user's rule id → the same 404 as an unknown id                        |
+
+Validation is Zod with strict objects (unknown keys are rejected, so a typo cannot silently
+do nothing). Keywords are trimmed, lower-cased and de-duplicated (≤ 10, each ≤ 50
+characters). A PATCH is merged into the stored rule and the **merged** rule is validated
+as a whole — e.g. switching a comment rule to `add_label` while keeping a 200-character
+value is rejected. The repository of a rule cannot be changed. Deleting a rule sets
+`automation_runs.rule_id` to null; runs keep their snapshot of the rule's name, action
+and value.
 
 ### GitHub API
 
