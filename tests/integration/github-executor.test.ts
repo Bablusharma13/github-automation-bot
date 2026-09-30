@@ -56,7 +56,7 @@ describe("add_label", () => {
       githubStatus: "succeeded",
       githubResult: { labelName: "Bug", alreadyApplied: false },
       slackStatus: "skipped",
-      slackError: "Slack notifications are not available in this build yet.",
+      slackError: "No Slack webhook is configured (Settings → Slack).",
     });
     expect((await reloadEvent(db, event.id)).status).toBe("processed");
   });

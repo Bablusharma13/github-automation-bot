@@ -3,6 +3,7 @@ import type { Db } from "../db";
 import type { AutomationRun, EventSubject, GitHubStepResult, Repository, WebhookEvent } from "../db/schema";
 import type { Env } from "../env";
 import { executeGitHubAction } from "./github-executor";
+import { sendSlackNotification } from "./slack-executor";
 
 export type StepContext = {
   db: Db;
@@ -27,15 +28,8 @@ export type Executors = {
   slack: (ctx: StepContext) => Promise<SlackStepOutput>;
 };
 
-/**
- * Production executors. Slack delivery is the next step to be implemented; until then the
- * Slack step is recorded as skipped with that reason — never reported as sent — so the
- * run's status reflects the real GitHub outcome.
- */
+/** Production executors: GitHub write-back, then the Slack notification of its outcome. */
 export const productionExecutors: Executors = {
   github: executeGitHubAction,
-  slack: async () => ({
-    status: "skipped",
-    reason: "Slack notifications are not available in this build yet.",
-  }),
+  slack: sendSlackNotification,
 };

@@ -1,5 +1,6 @@
 import "server-only";
 import { z } from "zod";
+import { isSlackWebhookUrl } from "@/lib/slack-url";
 
 /**
  * Server-side environment. Parsed lazily (on first use) so that `next build` does not
@@ -22,10 +23,12 @@ const envSchema = z
       .string()
       .refine((v) => Buffer.from(v, "base64").length === 32, "must be 32 bytes, base64-encoded"),
     CRON_SECRET: z.string().min(16, "use at least 16 random characters"),
+    // Optional deployment-wide default for users who have not saved their own webhook.
     SLACK_WEBHOOK_URL: z
       .string()
       .optional()
-      .transform((v) => (v === "" ? undefined : v)),
+      .transform((v) => (v === "" ? undefined : v))
+      .refine((v) => v === undefined || isSlackWebhookUrl(v), "must be a Slack Incoming Webhook URL"),
     // Optional override for the URL registered on GitHub repository webhooks. GitHub
     // refuses localhost URLs, so local development points this at a public HTTPS tunnel.
     // Defaults to `${APP_URL}/api/webhooks/github`.

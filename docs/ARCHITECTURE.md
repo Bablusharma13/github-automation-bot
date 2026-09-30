@@ -350,9 +350,31 @@ issues are disabled; other 403s → denied with GitHub's reason.
 
 ### Slack
 
-POST JSON (`text` + Block Kit `blocks`) to the user's configured Incoming Webhook URL, or
-the deployment default `SLACK_WEBHOOK_URL`. User-supplied URLs must match
-`https://hooks.slack.com/services/...` (SSRF guard) and are stored encrypted.
+The Slack step (`src/server/automation/slack-executor.ts`) runs once the GitHub step is
+terminal and posts its real outcome to a Slack Incoming Webhook:
+
+- **Destination**: the user's own webhook (Settings page, stored AES-256-GCM encrypted) →
+  otherwise the deployment default `SLACK_WEBHOOK_URL` → otherwise the step is `skipped`
+  with the reason "No Slack webhook is configured" (never reported as sent). A saved URL
+  that no longer decrypts is reported, not silently replaced by the default.
+- **Message**: fallback `text` plus Block Kit blocks — repository, event, linked
+  issue/PR title, author, matched rule, action (label added / already present / comment
+  link), status ✅/❌ and, on failure, the error. User-controlled text is escaped
+  (`&` `<` `>`), so an issue titled `<!channel>` cannot ping a channel or inject links.
+- **SSRF guard** (`src/lib/slack-url.ts`, also applied to `SLACK_WEBHOOK_URL` at startup):
+  https, host exactly `hooks.slack.com`, default port, no credentials, path under
+  `/services/`, no query. Redirects are not followed.
+- **Errors**: success is HTTP 200 with body `ok`. 4xx (e.g. `404 no_service`) are
+  permanent; 429 (Slack allows ~1 message/second per webhook) and 5xx/network errors are
+  retryable — the job retries only the Slack step.
+- **Secrecy**: Slack documents that the webhook URL contains a secret and revokes leaked
+  ones. It is never returned by the API, shown again in the UI, logged, or put in errors.
+- **Delivery semantics**: incoming webhooks have no idempotency key, so delivery is
+  at-least-once in the window where Slack accepted the POST but recording it failed.
+
+API: `GET /api/settings/slack` (source: `user` | `default` | `none`),
+`PUT /api/settings/slack { webhookUrl }`, `DELETE /api/settings/slack`, and
+`POST /api/settings/slack/test` (sends a real test message; 5 per minute per user).
 
 ### Optional AI
 
