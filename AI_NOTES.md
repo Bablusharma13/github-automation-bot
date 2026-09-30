@@ -104,15 +104,18 @@ These are not my own designs:
 5. **How it was fixed** (commit `7516002`). The form pre-selects a repository only when
    exactly one is connected; otherwise the repository must be chosen explicitly. Rule cards
    name their repository, and the overview shows "No rule matched". Once the rule was saved
-   on the right repository, the next test issue (#2) was labeled automatically.
+   on the right repository, the next test issue (#2) was labeled automatically. Later
+   (commit `23b61d7`) the form was tightened further: it never pre-selects a repository,
+   even when only one is connected.
    - **Tests — what exists:** the fix added an automated test for the "No rule matched" /
      matched-rule count (it also caught a query bug in that count). When the dashboard was
      rebuilt (`ed1a396`) that check moved to a unit test of the status logic
-     (`tests/unit/activity-status.test.ts`).
+     (`tests/unit/activity-status.test.ts`). Since `23b61d7` an API test also checks that
+     the server rejects a rule without a repository instead of picking one.
    - **Tests — what does not exist:** there is no automated UI test for the
-     repository-selection behaviour itself. (The correct rule was created before the fixed
-     form was deployed, so the new form has not been exercised with two repositories in
-     production either.)
+     repository-selection behaviour itself, and the form has not been exercised in a
+     browser in production since these changes (the correct rule was created before the
+     first fix was deployed).
 6. **What I learned.** Only testing the real flow end to end caught this: every automated
    test passed while the product did the wrong thing. A default value in a form is
    behaviour, and the UI has to say when nothing matched.

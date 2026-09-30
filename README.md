@@ -233,7 +233,7 @@ Sign in, connect a repository (through a tunnel, see above) and open an issue.
 ## Testing
 
 ```bash
-npm test          # 259 tests in 24 files
+npm test          # 262 tests in 25 files
 npm run check     # typecheck + lint + tests
 ```
 
@@ -251,11 +251,17 @@ npm run check     # typecheck + lint + tests
   queue (leases, fencing, backoff, crash recovery), AI triage (validation, key handling,
   failures never block) and one end-to-end test: signed delivery → stored event and job →
   worker → label → AI → Slack → dashboard API → redelivery acknowledged as a duplicate.
+- Security regressions: a test calls every browser-facing endpoint and checks that no
+  response contains the GitHub token, its ciphertext, the Slack URL, the session token or
+  a server secret.
 - Important tests were mutation-checked: the code under test was deliberately broken to
   confirm that the test fails.
+- Each DB-backed test file runs its own in-process Postgres; the suite uses at most 3
+  workers. On a machine with little free memory (about 1.5 GB or less) workers can crash
+  with memory errors — run `npx vitest run --maxWorkers=1` there.
 
-The real integrations were tested by hand in production (see
-[Demo / Evaluation Instructions](#demo--evaluation-instructions)).
+What was verified against the real services is listed in
+[Verification Status](#verification-status).
 
 ## Deployment
 
@@ -291,6 +297,31 @@ the GitHub Actions workflow [.github/workflows/worker-sweep.yml](.github/workflo
 | Sweeper                  | GitHub Actions every 5 min (scheduled runs not yet observed) + Vercel Cron daily at 03:00 UTC (first run due 2026-10-01) → `/api/cron/worker`           |
 | Environment (names only) | `APP_URL`, `DATABASE_URL`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`, `TOKEN_ENCRYPTION_KEY`, `CRON_SECRET`, `GEMINI_API_KEY` |
 
+## Verification Status
+
+State on 2026-09-30. **Verified** = observed in production (deployed app, real GitHub,
+Slack, Neon, Gemini). **Manually tested** = done by the owner in the browser.
+**Locally verified** = automated tests only. **Not yet confirmed** = not observed.
+
+| Behaviour                                                                         | Status                    | Evidence                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GitHub sign-in (OAuth, `state` + PKCE)                                            | Manually tested; Verified | Owner signed in (latest 13:42 UTC). HTTP checks: `state` (43 chars), PKCE `S256`, scopes `read:user user:email public_repo`, forged `state` → `/login?error=invalid_state`.                                                                                                                                                                     |
+| Repository connection + webhook                                                   | Manually tested; Verified | Owner connected `github-automation-bot` (13:07 UTC). GitHub API: exactly one hook, id equal to the stored one, events `issues` + `pull_request`, JSON, SSL verification on, secret set.                                                                                                                                                         |
+| Explicit repository selection in the rule form                                    | Locally verified          | Code (`23b61d7`) and an API test that a rule without a repository is rejected; not viewed in a browser after that change.                                                                                                                                                                                                                       |
+| Matching issue → label → AI → Slack → dashboard                                   | Verified                  | Issue #3 (13:33 UTC): `bug` label added, Gemini triage stored, Slack accepted the message, event processed in 2.4 s.                                                                                                                                                                                                                            |
+| Non-matching issue                                                                | Verified                  | Issue #4 (14:49 UTC): event recorded with 0 runs; no label or other change on GitHub.                                                                                                                                                                                                                                                           |
+| Redelivery of a real delivery                                                     | Verified                  | Issue #3's delivery redelivered (14:50 UTC): GitHub reused the delivery ID, the app answered `200` duplicate, still one event, one job and one run; the label was added once.                                                                                                                                                                   |
+| Failure → manual retry                                                            | Verified                  | Issue #5 (14:52 UTC): rule label missing → run failed with a clear message, Slack notified; label created → the app's retry function reset the failed steps and the production worker applied the label (14:55 UTC). The retry was started by calling the retry service, not the dashboard button (the button's API route is covered by tests). |
+| Processing right after each webhook (`after()`)                                   | Verified                  | Every real event above was processed within ~1–3 s.                                                                                                                                                                                                                                                                                             |
+| `/api/cron/worker` authentication and draining                                    | Verified                  | 401 without or with a wrong secret; 200 with the secret; it drained the retried job of issue #5.                                                                                                                                                                                                                                                |
+| Scheduled GitHub Actions sweep (every 5 min)                                      | **Not yet confirmed**     | 0 scheduled runs; fix `e2e2d4f` pushed at 13:54 UTC.                                                                                                                                                                                                                                                                                            |
+| Daily Vercel cron                                                                 | **Not yet confirmed**     | Configured; first run due 2026-10-01 around 03:00 UTC.                                                                                                                                                                                                                                                                                          |
+| Transient failures, backoff, leases, crash recovery                               | Locally verified          | Queue, worker and processing tests.                                                                                                                                                                                                                                                                                                             |
+| Webhook signature checks, anonymous and cross-origin API access, security headers | Verified                  | Forged or missing signature → 401; anonymous API → 401; cross-origin mutations → 403; CSP, `X-Frame-Options`, `nosniff`, HSTS present.                                                                                                                                                                                                          |
+| No tokens or secrets in API responses                                             | Locally verified          | Test `25398d2`; browser responses in production not inspected.                                                                                                                                                                                                                                                                                  |
+| Users cannot access each other's data                                             | Locally verified          | Authorization tests; needs a second account in production.                                                                                                                                                                                                                                                                                      |
+| No secrets in logs                                                                | Locally verified          | Logger redaction and log tests; production logs not inspected.                                                                                                                                                                                                                                                                                  |
+
 ## Demo / Evaluation Instructions
 
 You need a GitHub account and a **public repository you administer** — for example create
@@ -305,8 +336,9 @@ You cannot use someone else's repository: the bot needs admin rights to install 
    **Settings** → paste it → **Save** → **Send test notification**. Without it the Slack
    step shows _Skipped_ with the reason "No Slack webhook is configured (Settings →
    Slack)".
-5. **Rules** → **New rule** (the defaults already describe the standard test):
-   - Repository: your test repository
+5. **Rules** → **New rule** (the defaults already describe the standard test, except the
+   repository, which is never pre-selected):
+   - Repository: choose your test repository
    - Event: **Issue**, when it is **opened**
    - Keywords: `bug`, look in **Title**
    - Action: **Add label** `bug`
@@ -326,10 +358,8 @@ You cannot use someone else's repository: the bot needs admin rights to install 
    label on GitHub (**Issues → Labels → New label**), open the event, click **Retry failed
    steps** → it succeeds without repeating steps that already worked.
 10. Redelivery: on GitHub, **Settings → Webhooks → your hook → Recent Deliveries →
-    Redeliver**. A delivery ID the bot has already stored is acknowledged as _duplicate_
-    and nothing runs twice. (GitHub's documentation does not say whether a redelivery
-    keeps the original ID; if it gets a new one, the rule runs again and the label step
-    reports _already present_ — still no duplicate write.)
+    Redeliver**. GitHub resends the delivery with its original delivery ID (observed on
+    2026-09-30), so the bot answers _duplicate_ and nothing runs twice.
 11. When done, **Repositories → Disconnect** removes the webhook from your repository.
 
 ## Security & Reliability
