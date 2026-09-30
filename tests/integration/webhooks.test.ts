@@ -294,3 +294,29 @@ describe("request validation (after a valid signature)", () => {
     expect(res.status).toBe(413);
   });
 });
+
+describe("database unavailable", () => {
+  it("answers 500 instead of acknowledging, and GitHub's redelivery is accepted later", async () => {
+    // A closed database fails every query the way an unreachable one does.
+    const down = await createTestDb();
+    await down.close();
+    const deliveryId = randomUUID();
+    const rawBody = Buffer.from(JSON.stringify(issuePayload()), "utf8");
+    const headers = new Headers({
+      "x-github-event": "issues",
+      "x-github-delivery": deliveryId,
+      "x-github-hook-id": String(HOOK_ID),
+      "content-type": "application/json",
+      "x-hub-signature-256": signPayload(env.GITHUB_WEBHOOK_SECRET, rawBody),
+    });
+
+    const failed = await ingestGitHubDelivery(down.db, env, { headers, rawBody });
+    expect(failed.status).toBe(500);
+    expect(failed.body).toEqual({ error: { code: "internal_error", message: "Could not record delivery." } });
+
+    // Nothing was stored, so the same delivery id is new work once the database is back.
+    const redelivered = await deliver({ deliveryId });
+    expect(redelivered.status).toBe(202);
+    expect(await jobCount((await eventRow(deliveryId))!.id)).toBe(1);
+  });
+});
