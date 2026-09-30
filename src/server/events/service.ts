@@ -1,7 +1,7 @@
 import "server-only";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db";
-import { webhookEvents } from "../db/schema";
+import { automationRuns, webhookEvents } from "../db/schema";
 
 export type EventSummaryDTO = {
   id: string;
@@ -12,6 +12,8 @@ export type EventSummaryDTO = {
   subject: { kind: string; number: number; title: string; url: string } | null;
   status: string;
   ignoreReason: string | null;
+  /** How many rules matched (automation runs created) — 0 explains a "processed" event with no effect. */
+  runCount: number;
   receivedAt: string;
 };
 
@@ -27,6 +29,9 @@ export async function listRecentEvents(db: Db, userId: string, limit = 20): Prom
       subject: webhookEvents.subject,
       status: webhookEvents.status,
       ignoreReason: webhookEvents.ignoreReason,
+      // Correlated subquery with explicit table qualification: in a single-table select
+      // Drizzle renders columns unqualified, so "id" would bind to automation_runs.id.
+      runCount: sql<number>`(select count(*)::int from ${automationRuns} where ${automationRuns}.webhook_event_id = ${webhookEvents}.id)`,
       receivedAt: webhookEvents.receivedAt,
     })
     .from(webhookEvents)
@@ -38,6 +43,7 @@ export async function listRecentEvents(db: Db, userId: string, limit = 20): Prom
     subject: r.subject
       ? { kind: r.subject.kind, number: r.subject.number, title: r.subject.title, url: r.subject.url }
       : null,
+    runCount: Number(r.runCount),
     receivedAt: r.receivedAt.toISOString(),
   }));
 }

@@ -61,13 +61,18 @@ const keywordsFromText = (text: string) =>
     .map((k) => k.trim())
     .filter(Boolean);
 
-function describeTrigger(r: Pick<RuleDTO, "eventType" | "eventActions" | "keywords" | "keywordScope">) {
+function describeTrigger(
+  r: Pick<RuleDTO, "eventType" | "eventActions" | "keywords" | "keywordScope" | "repositoryFullName">,
+) {
   const subject = r.eventType === "issues" ? "an issue" : "a pull request";
   const actions = r.eventActions.join(" or ");
   const keywords = r.keywords.map((k) => `“${k}”`).join(" or ");
+  // Name the repository in the sentence: with several repos connected, a rule on the
+  // wrong one is otherwise easy to miss.
+  const where = `in ${r.repositoryFullName}`;
   return keywords
-    ? `When ${subject} is ${actions} and its ${KEYWORD_SCOPE_LABELS[r.keywordScope]} contains ${keywords}`
-    : `When ${subject} is ${actions}`;
+    ? `When ${subject} is ${actions} ${where} and its ${KEYWORD_SCOPE_LABELS[r.keywordScope]} contains ${keywords}`
+    : `When ${subject} is ${actions} ${where}`;
 }
 
 function describeAction(r: Pick<RuleDTO, "actionType" | "actionValue" | "notifySlack">) {
@@ -336,7 +341,9 @@ export function RulesManager() {
     },
   });
 
-  const connected = reposQuery.data?.repositories ?? [];
+  const connected = [...(reposQuery.data?.repositories ?? [])].sort((a, b) =>
+    a.fullName.localeCompare(b.fullName),
+  );
 
   if (rulesQuery.isPending || reposQuery.isPending) {
     return <p className="mt-8 text-sm text-stone-500">Loading rules…</p>;
@@ -380,7 +387,10 @@ export function RulesManager() {
         </p>
       ) : editing === "new" ? (
         <RuleForm
-          initial={emptyForm(connected[0]?.id)}
+          // Pre-select only when there is exactly one repository. With several, the user
+          // must choose explicitly (a silently pre-selected repo caused a rule to be
+          // created on the wrong repository in real use).
+          initial={emptyForm(connected.length === 1 ? connected[0]!.id : "")}
           repositories={connected}
           mode="create"
           pending={create.isPending}

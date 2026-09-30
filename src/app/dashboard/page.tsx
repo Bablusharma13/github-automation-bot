@@ -98,6 +98,11 @@ export default async function DashboardPage() {
                   >
                     {STATUS_LABELS[e.status] ?? e.status}
                     {e.ignoreReason ? ` · ${e.ignoreReason.replaceAll("_", " ")}` : ""}
+                    {e.status === "processed"
+                      ? e.runCount === 0
+                        ? " · no rule matched"
+                        : ` · ${e.runCount} rule${e.runCount === 1 ? "" : "s"} matched`
+                      : ""}
                   </span>
                   <time className="text-xs text-stone-500" dateTime={e.receivedAt}>
                     {new Date(e.receivedAt).toLocaleString()}
