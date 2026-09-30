@@ -170,17 +170,38 @@ with fine-grained permissions is the better path for that (see README "Future im
 
 ### Repository connection
 
-The dashboard lists the user's repositories from `GET /user/repos`, filtered to those the
-user can administer (required to create a webhook). Connecting a repo:
+API: `GET /api/github/repositories` (connectable repos, live from GitHub),
+`GET /api/repositories` (connected), `POST /api/repositories { fullName }`,
+`GET|DELETE /api/repositories/:id`. All go through `withUser()` (same-origin check for
+mutations, session → 401, per-user mutation rate limit → 429, central error mapping), and
+every query filters by the session user's id. Another user's repository id returns the
+same 404 as a non-existent one.
 
-1. Re-verify with GitHub that the user has admin permission on that repo.
-2. Create a repository webhook (`POST /repos/{owner}/{repo}/hooks`) pointing at
-   `${APP_URL}/api/webhooks/github`, content type JSON, events `issues` and
-   `pull_request`, secret `GITHUB_WEBHOOK_SECRET`.
-3. Store the repo row with the returned hook id.
+The connectable list comes from `GET /user/repos?visibility=public` (up to 3 pages of
+100), filtered to public, non-archived repositories the user administers (admin is
+required to create a webhook). Connecting a repo:
 
-Disconnecting deletes the webhook on GitHub (tolerating 404) and marks the repo inactive.
-GitHub never returns the webhook secret, and our API never exposes it.
+1. Look the repository up on GitHub with the user's token — the client only sends
+   `owner/name`, and nothing it claims is trusted. Reject private (outside our
+   `public_repo` scope), archived (read-only) and non-admin repositories.
+2. If another account has an active connection → 409. If this user already has it
+   connected with a webhook → return it (idempotent, no second hook).
+3. Create the webhook (`POST /repos/{owner}/{repo}/hooks`: JSON, events `issues` +
+   `pull_request`, secret `GITHUB_WEBHOOK_SECRET`, `insecure_ssl: "0"`). If GitHub answers
+   422 "Hook already exists", find the hook with our URL and PATCH it — re-sending the
+   secret, because GitHub removes the secret on PATCH otherwise.
+4. Upsert the repository row as active with the hook id. If that fails after we created
+   the hook, the hook is deleted again (only hooks created in this request, never a
+   pre-existing one). A unique-index violation from a concurrent connection → 409.
+
+The webhook URL is `${APP_URL}/api/webhooks/github`, or `GITHUB_WEBHOOK_URL` when set.
+GitHub rejects localhost URLs, so local development needs a public HTTPS tunnel.
+
+Disconnecting deletes the webhook on GitHub (404 counts as already removed) and marks the
+repo inactive; events, runs and rules are kept. If GitHub cannot be reached, the repo is
+still deactivated (deliveries for inactive repos are ignored) and the response says the
+webhook may need manual removal rather than claiming success. GitHub never returns the
+webhook secret, and our API never exposes it.
 
 ### Webhook flow
 

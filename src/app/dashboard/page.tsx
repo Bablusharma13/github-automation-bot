@@ -1,48 +1,51 @@
 import type { Metadata } from "next";
-import Image from "next/image";
+import Link from "next/link";
 import { requireUser } from "@/server/auth/dal";
+import { getDb } from "@/server/db";
+import { listConnectedRepositories } from "@/server/repositories/service";
 
 export const metadata: Metadata = { title: "Dashboard · GitHub Automation Bot" };
 
 export default async function DashboardPage() {
   const user = await requireUser();
+  const repos = await listConnectedRepositories(getDb(), user.id);
 
   return (
-    <div className="flex flex-1 flex-col">
-      <header className="border-b border-stone-200 bg-white">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-3">
-          <span className="font-mono text-xs uppercase tracking-widest text-stone-500">
-            GitHub Automation Bot
-          </span>
-          <div className="flex items-center gap-3">
-            {user.avatarUrl && (
-              <Image
-                src={user.avatarUrl}
-                alt=""
-                width={28}
-                height={28}
-                unoptimized
-                className="rounded-full border border-stone-200"
-              />
-            )}
-            <span className="text-sm font-medium">{user.githubLogin}</span>
-            <form action="/api/auth/logout" method="post">
-              <button
-                type="submit"
-                className="rounded-md border border-stone-300 px-3 py-1.5 text-sm hover:bg-stone-100 focus-visible:outline-2 focus-visible:outline-stone-900"
-              >
-                Sign out
-              </button>
-            </form>
-          </div>
+    <div>
+      <h1 className="text-2xl font-semibold tracking-tight">Welcome, {user.name ?? user.githubLogin}</h1>
+      <p className="mt-2 text-stone-600">
+        {repos.length === 0
+          ? "Connect a repository to start automating issues and pull requests."
+          : `${repos.length} connected ${repos.length === 1 ? "repository" : "repositories"}.`}
+      </p>
+
+      <section className="mt-8 rounded-lg border border-stone-200 bg-white p-5">
+        <div className="flex items-center justify-between">
+          <h2 className="font-medium">Connected repositories</h2>
+          <Link
+            href="/dashboard/repositories"
+            className="text-sm text-stone-600 underline hover:text-stone-900"
+          >
+            Manage
+          </Link>
         </div>
-      </header>
-      <main className="mx-auto w-full max-w-5xl px-6 py-10">
-        <h1 className="text-2xl font-semibold tracking-tight">Welcome, {user.name ?? user.githubLogin}</h1>
-        <p className="mt-2 text-stone-600">
-          You are signed in with GitHub. Repository connection and automation rules are the next step.
-        </p>
-      </main>
+        {repos.length === 0 ? (
+          <p className="mt-3 text-sm text-stone-500">None yet.</p>
+        ) : (
+          <ul className="mt-3 divide-y divide-stone-100">
+            {repos.map((r) => (
+              <li key={r.id} className="flex items-center justify-between py-2 text-sm">
+                <a href={r.htmlUrl} target="_blank" rel="noreferrer" className="font-mono hover:underline">
+                  {r.fullName}
+                </a>
+                <span className="text-xs text-stone-500">
+                  {r.webhookInstalled ? "Webhook installed" : "No webhook"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

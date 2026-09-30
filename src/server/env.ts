@@ -26,6 +26,19 @@ const envSchema = z
       .string()
       .optional()
       .transform((v) => (v === "" ? undefined : v)),
+    // Optional override for the URL registered on GitHub repository webhooks. GitHub
+    // refuses localhost URLs, so local development points this at a public HTTPS tunnel.
+    // Defaults to `${APP_URL}/api/webhooks/github`.
+    GITHUB_WEBHOOK_URL: z
+      .string()
+      .optional()
+      .transform((v) => (v === "" ? undefined : v))
+      .pipe(
+        z
+          .url()
+          .refine((u) => u.startsWith("https://"), "must be an https:// URL")
+          .optional(),
+      ),
   })
   .superRefine((env, ctx) => {
     // Secure cookies are derived from the APP_URL scheme, so production must be HTTPS.
