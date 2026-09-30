@@ -37,6 +37,7 @@ const event = (overrides: Partial<EventDTO> = {}): EventDTO => ({
   processedAt: null,
   job: null,
   runs: [],
+  ai: null,
   ...overrides,
 });
 

@@ -15,6 +15,7 @@ import {
   issueSubject,
   reloadEvent,
   runsFor,
+  noTriage,
 } from "../helpers/fixtures";
 
 let db: Db;
@@ -47,6 +48,7 @@ function fakeExecutors(script: { github?: Step[]; slack?: Array<Step | SlackStep
       if (next instanceof Error) throw next;
       return next === "ok" ? { status: "sent" } : next;
     },
+    triage: noTriage,
   };
   return { executors, calls };
 }

@@ -24,6 +24,7 @@ import {
   reloadEvent,
   reloadJob,
   runsFor,
+  noTriage,
 } from "../helpers/fixtures";
 
 let db: Db;
@@ -55,6 +56,7 @@ const retry = (cookie: string, id: string, schedule = vi.fn(), origin?: string) 
 const ok: Executors = {
   github: async (ctx) => ({ labelName: ctx.run.actionValue, alreadyApplied: false }),
   slack: async () => ({ status: "sent" }),
+  triage: noTriage,
 };
 const process = (eventId: string, executors: Executors, attempt = 1, isFinalAttempt = false) =>
   processEvent(db, env, { webhookEventId: eventId, attempt, isFinalAttempt }, executors);
@@ -207,6 +209,7 @@ describe("POST /api/events/:id/retry", () => {
         slackCalls.push(ctx.run.githubStatus);
         return { status: "sent" };
       },
+      triage: noTriage,
     };
     // Earlier tests in this file leave pending jobs behind; this test drains the real
     // queue, so keep only its own job there.
@@ -248,6 +251,7 @@ describe("POST /api/events/:id/retry", () => {
       slack: async () => {
         throw new StepError("Slack rejected the notification (404: no_service).", false);
       },
+      triage: noTriage,
     };
     await process(event.id, slackDown);
     expect((await runsFor(db, event.id))[0]).toMatchObject({

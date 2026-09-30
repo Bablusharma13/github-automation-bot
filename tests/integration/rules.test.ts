@@ -15,7 +15,7 @@ import {
 } from "@/server/rules/handlers";
 import { apiRequest } from "../helpers/auth";
 import { createTestDb } from "../helpers/db";
-import { createEvent, createOwnerWithRepo, runsFor } from "../helpers/fixtures";
+import { createEvent, createOwnerWithRepo, noTriage, runsFor } from "../helpers/fixtures";
 
 let db: Db;
 let close: () => Promise<void>;
@@ -235,6 +235,7 @@ describe("DELETE /api/rules/:id", () => {
     const noop: Executors = {
       github: async () => ({ labelName: "bug", alreadyApplied: false }),
       slack: async () => ({ status: "sent" }),
+      triage: noTriage,
     };
     await processEvent(db, env, { webhookEventId: event.id, attempt: 1, isFinalAttempt: false }, noop);
 
@@ -253,6 +254,7 @@ describe("rules created through the API drive the engine", () => {
     const executors: Executors = {
       github: async () => ({ labelName: "bug", alreadyApplied: false }),
       slack: async () => ({ status: "sent" }),
+      triage: noTriage,
     };
     const { event } = await createEvent(db, o);
     await processEvent(db, env, { webhookEventId: event.id, attempt: 1, isFinalAttempt: false }, executors);

@@ -6,7 +6,7 @@ import { useState } from "react";
 import type { EventDTO, EventFilter } from "@/lib/activity-types";
 import { apiFetch } from "@/lib/api-client";
 import { formatDateTime, timeAgo } from "@/lib/format";
-import { Badge, describeRunAction, eventSummary, StepBadge } from "./activity-status";
+import { Badge, describeRunAction, eventSummary, PriorityBadge, StepBadge } from "./activity-status";
 
 type Page = { events: EventDTO[]; nextCursor: string | null };
 
@@ -143,9 +143,23 @@ export function ActivityFeed({ pageSize = 25, compact = false }: { pageSize?: nu
                     <td className="whitespace-nowrap px-3 py-2">{e.senderLogin ?? "—"}</td>
                     <td className="max-w-[16rem] px-3 py-2">
                       {e.subject ? (
-                        <Link href={`/dashboard/activity/${e.id}`} className="line-clamp-2 hover:underline">
-                          #{e.subject.number} {e.subject.title}
-                        </Link>
+                        <>
+                          <Link href={`/dashboard/activity/${e.id}`} className="line-clamp-2 hover:underline">
+                            #{e.subject.number} {e.subject.title}
+                          </Link>
+                          {e.ai?.result && (
+                            <span
+                              className="mt-1 flex items-center gap-1.5 text-xs text-stone-500"
+                              title={e.ai.result.summary}
+                            >
+                              <PriorityBadge priority={e.ai.result.priority} />
+                              AI suggests “{e.ai.result.suggestedLabel}”
+                            </span>
+                          )}
+                          {e.ai?.status === "failed" && (
+                            <span className="mt-1 block text-xs text-red-700">AI triage failed</span>
+                          )}
+                        </>
                       ) : (
                         <span className="text-stone-400">—</span>
                       )}

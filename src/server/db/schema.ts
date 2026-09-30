@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { AiTriage } from "../../lib/ai-triage";
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -144,6 +145,8 @@ export const rules = pgTable(
     /** Label name for add_label; comment body for add_comment. */
     actionValue: text("action_value").notNull(),
     notifySlack: boolean("notify_slack").notNull().default(true),
+    /** Ask the AI for a triage suggestion (display-only) when this rule matches. */
+    aiTriage: boolean("ai_triage").notNull().default(false),
     ...timestamps,
   },
   (t) => [index("rules_repository_id_idx").on(t.repositoryId), index("rules_user_id_idx").on(t.userId)],
@@ -183,6 +186,15 @@ export const webhookEvents = pgTable(
     status: eventStatusEnum("status").notNull().default("received"),
     ignoreReason: text("ignore_reason"),
     errorMessage: text("error_message"),
+    /**
+     * Optional AI triage, computed at most once per event (it is the same for every rule).
+     * Null status = not requested. Suggestions only: no action ever depends on them.
+     */
+    aiStatus: stepStatusEnum("ai_status"),
+    aiResult: jsonb("ai_result").$type<AiTriage>(),
+    aiModel: text("ai_model"),
+    aiError: text("ai_error"),
+    aiCompletedAt: timestamp("ai_completed_at", { withTimezone: true }),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },

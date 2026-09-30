@@ -10,7 +10,16 @@ import {
   type EventSubject,
 } from "@/server/db/schema";
 import type { Env } from "@/server/env";
+import type { Executors } from "@/server/automation/executors";
 import { createSignedInUser } from "./auth";
+
+/**
+ * For tests whose rules do not ask for AI triage, so it must not be called. (processEvent
+ * records AI errors instead of throwing, so a call would show up as a failed triage.)
+ */
+export const noTriage: Executors["triage"] = async () => {
+  throw new Error("AI triage was not expected in this test");
+};
 
 let repoSeq = 50_000_000;
 

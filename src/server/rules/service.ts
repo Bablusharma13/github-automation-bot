@@ -22,6 +22,7 @@ function toDTO(rule: Rule, repo: { fullName: string; active: boolean }): RuleDTO
     actionType: rule.actionType,
     actionValue: rule.actionValue,
     notifySlack: rule.notifySlack,
+    aiTriage: rule.aiTriage,
     createdAt: rule.createdAt.toISOString(),
     updatedAt: rule.updatedAt.toISOString(),
   };
@@ -107,6 +108,7 @@ export async function updateRule(
     actionType: patch.actionType ?? rule.actionType,
     actionValue: patch.actionValue ?? rule.actionValue,
     notifySlack: patch.notifySlack ?? rule.notifySlack,
+    aiTriage: patch.aiTriage ?? rule.aiTriage,
   });
   if (!merged.success) {
     const issue = merged.error.issues[0];

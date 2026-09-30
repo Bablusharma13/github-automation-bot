@@ -1,5 +1,7 @@
 /** Activity data as the dashboard receives it (no secrets, no tokens, no payloads). */
 
+import type { AiTriage } from "./ai-triage";
+
 export type StepStatus = "pending" | "succeeded" | "skipped" | "failed";
 
 export type RunDTO = {
@@ -35,6 +37,15 @@ export type JobDTO = {
   completedAt: string | null;
 };
 
+/** Null on an event means no matched rule asked for AI triage. */
+export type AiTriageDTO = {
+  status: StepStatus;
+  result: AiTriage | null;
+  model: string | null;
+  error: string | null;
+  completedAt: string | null;
+};
+
 export type EventDTO = {
   id: string;
   deliveryId: string;
@@ -57,6 +68,7 @@ export type EventDTO = {
   processedAt: string | null;
   job: JobDTO | null;
   runs: RunDTO[];
+  ai: AiTriageDTO | null;
 };
 
 export type EventDetailDTO = EventDTO & { bodyPreview: string };

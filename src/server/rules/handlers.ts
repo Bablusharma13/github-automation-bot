@@ -18,13 +18,17 @@ function parseId(id: string): string {
 
 /** GET /api/rules[?repositoryId=] */
 export function listRulesHandler(request: NextRequest, deps: Deps) {
-  return withUser(request, deps, "rules_list", async (user, { db }) => {
+  return withUser(request, deps, "rules_list", async (user, { db, env }) => {
     const repositoryId = request.nextUrl.searchParams.get("repositoryId");
     if (repositoryId !== null && !z.uuid().safeParse(repositoryId).success) {
       throw new AppError(400, "invalid_input", "repositoryId must be a UUID.");
     }
     return NextResponse.json(
-      { rules: await listRules(db, user.id, repositoryId ?? undefined) },
+      {
+        rules: await listRules(db, user.id, repositoryId ?? undefined),
+        // Lets the rule form say whether AI triage will actually run (no key details).
+        aiAvailable: Boolean(env.GEMINI_API_KEY),
+      },
       { headers: noStore },
     );
   });

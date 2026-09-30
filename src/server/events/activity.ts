@@ -73,6 +73,15 @@ function toEventDTO(e: WebhookEvent, job: Job | undefined, runs: AutomationRun[]
     processedAt: iso(e.processedAt),
     job: job ? toJobDTO(job) : null,
     runs: runs.map(toRunDTO),
+    ai: e.aiStatus
+      ? {
+          status: e.aiStatus,
+          result: e.aiStatus === "succeeded" ? (e.aiResult ?? null) : null,
+          model: e.aiModel,
+          error: e.aiError,
+          completedAt: iso(e.aiCompletedAt),
+        }
+      : null,
   };
 }
 

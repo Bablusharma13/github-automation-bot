@@ -28,6 +28,30 @@ describe("getEnv", () => {
     expect(message).not.toContain("not-32-bytes-super-secret-value");
   });
 
+  it("treats empty Gemini settings as unset", async () => {
+    process.env.GEMINI_API_KEY = "";
+    process.env.GEMINI_MODEL = "";
+    const { getEnv } = await import("@/server/env");
+    const env = getEnv();
+    expect(env.GEMINI_API_KEY).toBeUndefined();
+    expect(env.GEMINI_MODEL).toBeUndefined();
+  });
+
+  it.each(["../../v1/files", "models/gemini?x=1", "Gemini-Flash", "gemini flash"])(
+    "rejects GEMINI_MODEL %j (it becomes part of the request path)",
+    async (model) => {
+      process.env.GEMINI_MODEL = model;
+      const { getEnv } = await import("@/server/env");
+      expect(() => getEnv()).toThrow(/GEMINI_MODEL/);
+    },
+  );
+
+  it("accepts a plain Gemini model id", async () => {
+    process.env.GEMINI_MODEL = "gemini-3.1-flash-lite";
+    const { getEnv } = await import("@/server/env");
+    expect(getEnv().GEMINI_MODEL).toBe("gemini-3.1-flash-lite");
+  });
+
   it("rejects an APP_URL with a path (OAuth callback and webhook URLs are derived from it)", async () => {
     process.env.APP_URL = "https://example.test/app";
     const { getEnv } = await import("@/server/env");

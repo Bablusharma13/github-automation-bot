@@ -34,6 +34,7 @@ const ruleFields = {
   actionType: z.enum(RULE_ACTION_TYPES),
   actionValue: z.string().trim().min(1, "A label name or comment text is required."),
   notifySlack: z.boolean(),
+  aiTriage: z.boolean(),
 };
 
 /** The value's limits depend on the action, so they are checked on the whole rule. */
@@ -69,6 +70,8 @@ export const createRuleSchema = z
     actionType: ruleFields.actionType,
     actionValue: ruleFields.actionValue,
     notifySlack: ruleFields.notifySlack.default(true),
+    // Off unless asked for: it sends the issue text to a third-party AI provider.
+    aiTriage: ruleFields.aiTriage.default(false),
   })
   .superRefine(checkActionValue);
 
@@ -87,6 +90,7 @@ export const updateRuleSchema = z
     actionType: ruleFields.actionType,
     actionValue: z.string(),
     notifySlack: ruleFields.notifySlack,
+    aiTriage: ruleFields.aiTriage,
   })
   .partial()
   .refine((patch) => Object.keys(patch).length > 0, "Nothing to update.");

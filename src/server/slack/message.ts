@@ -33,7 +33,8 @@ function describeAction(run: AutomationRun): string {
 
 export type NotificationInput = {
   run: AutomationRun;
-  event: Pick<WebhookEvent, "action">;
+  /** The AI fields are present once the event's (optional) triage has run. */
+  event: Pick<WebhookEvent, "action"> & Partial<Pick<WebhookEvent, "aiStatus" | "aiResult">>;
   subject: EventSubject;
   repository: Pick<Repository, "fullName">;
 };
@@ -76,6 +77,21 @@ export function buildRunNotification({ run, event, subject, repository }: Notifi
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: `*Error*\n${escapeSlack(clip(run.githubError, 500))}` },
+    });
+  }
+  const ai = event.aiStatus === "succeeded" ? event.aiResult : null;
+  if (ai) {
+    // Model output is untrusted text like any other user content: escaped and clipped.
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          "*AI triage (suggestion only)*",
+          escapeSlack(clip(ai.summary, 300)),
+          `Suggested label: \`${escapeSlack(ai.suggestedLabel)}\` · Priority: *${escapeSlack(ai.priority)}*`,
+        ].join("\n"),
+      },
     });
   }
   return { text: clip(text, 300), blocks };

@@ -29,6 +29,7 @@ type FormState = {
   actionType: RuleActionType;
   actionValue: string;
   notifySlack: boolean;
+  aiTriage: boolean;
 };
 
 const emptyForm = (repositoryId = ""): FormState => ({
@@ -41,6 +42,7 @@ const emptyForm = (repositoryId = ""): FormState => ({
   actionType: "add_label",
   actionValue: "bug",
   notifySlack: true,
+  aiTriage: false,
 });
 
 const formFromRule = (r: RuleDTO): FormState => ({
@@ -53,6 +55,7 @@ const formFromRule = (r: RuleDTO): FormState => ({
   actionType: r.actionType,
   actionValue: r.actionValue,
   notifySlack: r.notifySlack,
+  aiTriage: r.aiTriage,
 });
 
 const keywordsFromText = (text: string) =>
@@ -75,12 +78,13 @@ function describeTrigger(
     : `When ${subject} is ${actions} ${where}`;
 }
 
-function describeAction(r: Pick<RuleDTO, "actionType" | "actionValue" | "notifySlack">) {
+function describeAction(r: Pick<RuleDTO, "actionType" | "actionValue" | "notifySlack" | "aiTriage">) {
   const action =
     r.actionType === "add_label"
       ? `add the label “${r.actionValue}”`
       : `post a comment (${r.actionValue.length} characters)`;
-  return `${action}${r.notifySlack ? ", then notify Slack" : ""}`;
+  const ai = r.aiTriage ? ", ask AI for a triage suggestion" : "";
+  return `${action}${ai}${r.notifySlack ? ", then notify Slack" : ""}`;
 }
 
 function ErrorText({ error }: { error: unknown }) {
@@ -102,6 +106,7 @@ function RuleForm({
   initial,
   repositories,
   mode,
+  aiAvailable,
   pending,
   error,
   onSubmit,
@@ -110,6 +115,7 @@ function RuleForm({
   initial: FormState;
   repositories: RepositoryDTO[];
   mode: "create" | "edit";
+  aiAvailable: boolean;
   pending: boolean;
   error: unknown;
   onSubmit: (form: FormState) => void;
@@ -259,6 +265,22 @@ function RuleForm({
         />
         Send a Slack notification with the outcome
       </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={form.aiTriage}
+          onChange={(e) => set("aiTriage", e.target.checked)}
+          className="mt-1"
+        />
+        <span>
+          Add an AI triage suggestion (summary, suggested label, priority) to the activity log and Slack
+          <span className="block text-xs text-stone-500">
+            Sends the issue or pull request title and body to Google Gemini. Suggestions only — the bot never
+            acts on them.
+            {!aiAvailable && " AI is not configured on this server, so the step will be recorded as skipped."}
+          </span>
+        </span>
+      </label>
       <ErrorText error={error} />
       <div className="flex gap-2">
         <button
@@ -289,7 +311,7 @@ export function RulesManager() {
 
   const rulesQuery = useQuery({
     queryKey: ["rules"],
-    queryFn: () => apiFetch<{ rules: RuleDTO[] }>("/api/rules"),
+    queryFn: () => apiFetch<{ rules: RuleDTO[]; aiAvailable: boolean }>("/api/rules"),
   });
   const reposQuery = useQuery({
     queryKey: ["repositories"],
@@ -306,6 +328,7 @@ export function RulesManager() {
     actionType: f.actionType,
     actionValue: f.actionValue,
     notifySlack: f.notifySlack,
+    aiTriage: f.aiTriage,
   });
 
   const create = useMutation({
@@ -362,6 +385,7 @@ export function RulesManager() {
     );
 
   const rules = rulesQuery.data.rules;
+  const aiAvailable = rulesQuery.data.aiAvailable;
 
   return (
     <div className="mt-8 space-y-6">
@@ -393,6 +417,7 @@ export function RulesManager() {
           initial={emptyForm(connected.length === 1 ? connected[0]!.id : "")}
           repositories={connected}
           mode="create"
+          aiAvailable={aiAvailable}
           pending={create.isPending}
           error={create.error}
           onSubmit={(f) => create.mutate(f)}
@@ -431,6 +456,7 @@ export function RulesManager() {
                     { id: rule.repositoryId, fullName: rule.repositoryFullName } as RepositoryDTO,
                   ]}
                   mode="edit"
+                  aiAvailable={aiAvailable}
                   pending={update.isPending}
                   error={update.error}
                   onSubmit={(f) => update.mutate({ id: rule.id, body: toBody(f) })}

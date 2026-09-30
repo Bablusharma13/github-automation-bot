@@ -51,6 +51,7 @@ export type RuleDTO = {
   actionType: RuleActionType;
   actionValue: string;
   notifySlack: boolean;
+  aiTriage: boolean;
   createdAt: string;
   updatedAt: string;
 };

@@ -200,4 +200,28 @@ describe("buildRunNotification", () => {
       }).text,
     ).toContain("was already present");
   });
+
+  it("adds the AI suggestion only when the triage succeeded, escaped like any other text", () => {
+    const aiResult = {
+      summary: "Login breaks <!here> after refresh & reload",
+      suggestedLabel: "bug" as const,
+      priority: "critical" as const,
+    };
+    const build = (aiStatus: "succeeded" | "failed" | null) =>
+      flatten(
+        buildRunNotification({
+          run: baseRun,
+          event: { action: "opened", aiStatus, aiResult: aiStatus === "succeeded" ? aiResult : null },
+          subject,
+          repository: { fullName: "o/r" },
+        }),
+      );
+    const ok = build("succeeded");
+    expect(ok).toContain("AI triage (suggestion only)");
+    expect(ok).toContain("Login breaks &lt;!here&gt; after refresh &amp; reload");
+    expect(ok).toContain("Suggested label: `bug` · Priority: *critical*");
+    expect(ok).not.toContain("<!here>");
+    expect(build("failed")).not.toContain("AI triage");
+    expect(build(null)).not.toContain("AI triage");
+  });
 });

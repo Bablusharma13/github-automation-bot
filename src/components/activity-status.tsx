@@ -1,4 +1,5 @@
 import type { EventDTO, RunDTO, StepStatus } from "@/lib/activity-types";
+import type { AiPriority } from "@/lib/ai-triage";
 import { timeAgo } from "@/lib/format";
 
 type Tone = "green" | "red" | "amber" | "blue" | "gray";
@@ -67,6 +68,22 @@ export function StepBadge({
       {attempts && attempts > 1 ? ` · ${attempts} tries` : ""}
     </Badge>
   );
+}
+
+const PRIORITY_TONE: Record<AiPriority, Tone> = {
+  low: "gray",
+  medium: "blue",
+  high: "amber",
+  critical: "red",
+};
+
+export function PriorityBadge({ priority }: { priority: AiPriority }) {
+  return <Badge tone={PRIORITY_TONE[priority]}>{priority}</Badge>;
+}
+
+/** Whether "Retry failed steps" has anything to do for this event. */
+export function canRetryEvent(e: EventDTO): boolean {
+  return e.status === "failed" || e.runs.some((r) => r.status === "failed") || e.ai?.status === "failed";
 }
 
 export function describeRunAction(r: RunDTO): string {

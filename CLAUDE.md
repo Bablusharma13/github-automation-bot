@@ -48,6 +48,9 @@ repository. Read `docs/ARCHITECTURE.md` before changing structure.
 - Validate all input (body, query, params) with Zod at the route boundary.
 - Client-facing errors are generic; details go to server logs.
 - GitHub OAuth tokens and user Slack webhook URLs are encrypted at rest (AES-256-GCM).
+- AI (Gemini) output is a display-only suggestion: validate it with Zod, escape it when
+  rendering, and never let it choose or trigger an action. Issue text in prompts is
+  untrusted data. An AI failure is recorded and must never block GitHub or Slack steps.
 
 ## Coding conventions
 

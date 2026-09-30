@@ -85,6 +85,7 @@ Rejected alternatives:
 
  GitHub ──(issues / pull_request webhook)──► POST /api/webhooks/github
  GitHub Actions schedule (every ~5 min) ──► GET /api/cron/worker
+ Worker ──(optional AI triage, x-goog-api-key)──► Gemini API generateContent
 ```
 
 ## Components
@@ -250,7 +251,7 @@ processes due jobs until a time budget runs out; it is triggered by:
    `.github/workflows/worker-sweep.yml` every ~5 minutes (best-effort timing) and by a daily
    Vercel cron (`vercel.json`). It also purges expired sessions and stale rate-limit rows,
    and returns counts only (its output lands in public workflow logs).
-3. A manual "Retry" action in the dashboard (planned, owner-checked).
+3. The dashboard's "Retry failed steps" action (owner-checked; see Dashboard).
 
 Correctness never depends on the trigger: all state is in Postgres, and every trigger
 just drains whatever is due.
@@ -282,6 +283,10 @@ safe to repeat:
   write-back, then Slack. A step that succeeded is never executed again, so a Slack
   failure cannot repeat or undo the GitHub action. Slack runs only once the GitHub step is
   terminal, so the notification reports the real outcome — including failures.
+- Order within one attempt: the GitHub steps of all runs, then the optional AI triage
+  (once per event), then the Slack steps. The label/comment never waits for the AI, and
+  the Slack message can include the suggestion. An AI failure is recorded on the event and
+  never makes the job retry (see "Optional AI").
 - Error classification: an error's `retryable` flag decides (GitHub network/timeout, 5xx,
   429 and rate-limit 403 are retryable; other 4xx and a revoked authorization are not).
   Errors without the flag are treated as transient.
@@ -313,8 +318,10 @@ A rule belongs to one of the user's connected repositories and matches on: event
 more), and optional keywords — case-insensitive substring match, ANY keyword, against the
 title or the title + body. No keywords = every event of that type/action. Actions:
 `add_label` (label name ≤ 50 characters, GitHub's limit) or `add_comment` (≤ 2,000
-characters), plus a Slack toggle. Evaluation is a pure function (`ruleMatchesEvent`) run
-at processing time; each matching rule produces one automation run.
+characters), plus a Slack toggle and an AI triage toggle (off by default, because it sends
+the issue text to a third-party AI provider). Evaluation is a pure function
+(`ruleMatchesEvent`) run at processing time; each matching rule produces one automation
+run.
 
 API (all through `withUser()`, every query scoped by the session user's id):
 
@@ -391,7 +398,9 @@ by the session user and answer 404 for other users' ids):
 - **Event detail** `/dashboard/activity/[id]`: delivery (repository, event, actor,
   delivery id, labels, body preview, timestamps), processing (job status, attempts, next
   attempt, last error), and each matched rule's GitHub and Slack steps with attempts and
-  errors. "Retry failed steps" is shown when something failed.
+  errors, plus the AI triage (summary, suggested label, priority, model — or why it failed
+  or was skipped). "Retry failed steps" is shown when something failed, including the AI
+  triage. The activity table shows the AI's priority and suggested label under the title.
 - **Repositories**, **Rules**, **Settings** (Slack) as described above.
 
 Live updates are TanStack Query polling (activity every 5 s, stats/failures every 10 s,
@@ -408,10 +417,71 @@ in `after()`.
 
 ### Optional AI
 
-After core flow works: Gemini generates a short summary, a suggested category and a
-priority from the issue/PR title and body. Output is requested as JSON, validated with Zod,
-and treated as display-only data — it never selects which GitHub action runs. AI failures
-are recorded and do not fail the run.
+A rule with **AI triage** on asks Google Gemini for a suggestion about the issue or pull
+request: a one- or two-sentence summary, a suggested label (`bug`, `enhancement`,
+`documentation`, `question`, `security` or `none`) and a priority (`low` … `critical`).
+Facts verified against Google's documentation on 2026-09-30:
+
+- **API**: REST `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
+  (Google's docs say it "remains fully supported"; the newer Interactions API is in beta).
+  The key goes in the `x-goog-api-key` header, never in the URL. JSON output is requested
+  with `generationConfig.responseFormat.text` (`mimeType: APPLICATION_JSON` plus a JSON
+  Schema); the older `responseSchema` field is marked deprecated.
+- **Model**: `gemini-3.5-flash-lite` by default (stable, has a free tier, thinks
+  "minimal" by default, which Google recommends for classification). `GEMINI_MODEL`
+  overrides it; the id is validated because it becomes part of the request path.
+- **Free tier**: no billing account needed; rate limits are per Google Cloud project and
+  shown only in AI Studio; exceeding them returns `429 RESOURCE_EXHAUSTED`. On the free
+  tier Google may use prompts and responses to improve its products and human reviewers
+  may read them, and Google's terms say not to submit sensitive, confidential or personal
+  information. This app only connects public repositories, so the text sent is already
+  public, and the feature is opt-in per rule.
+
+Design (`src/server/ai/`, `src/server/automation/ai-executor.ts`):
+
+- **Once per event**, not per rule, stored on `webhook_events` (`ai_status`, `ai_result`,
+  `ai_model`, `ai_error`, `ai_completed_at`). It runs only if a matched rule asks for it
+  and `ai_status` is still null, so job retries never repeat it.
+- **Never blocks**: any failure (no key → `skipped` with the reason; quota, network,
+  invalid output → `failed` with the reason) is recorded, and GitHub and Slack carry on.
+  It is not retried automatically; "Retry failed steps" clears a failed triage and runs it
+  again without repeating steps that succeeded.
+- **Untrusted input**: the title/body (body cut to 4,000 characters) only appear in the
+  user message between `<<<BEGIN UNTRUSTED>>>` markers; the system instruction says to
+  treat them as data. Because the output is display-only, a successful prompt injection
+  can at worst produce a misleading suggestion.
+- **Untrusted output**: the JSON is parsed and validated with Zod (enums compared
+  case-insensitively, extra fields dropped); the summary has control characters removed
+  and is clipped to 300 characters; Slack escapes it like any other user text and React
+  escapes it in the dashboard. Nothing in the bot acts on the suggestion.
+- **Quota protection**: 30 AI calls per hour per account (Postgres rate limiter), so one
+  busy or spammed repository cannot use up the deployment's shared free quota.
+- **Secrecy**: the key is only in server env vars, is scrubbed from any error text before
+  it is stored or logged, and the browser only learns whether AI is configured
+  (`aiAvailable` on `GET /api/rules`).
+
+### Observability
+
+Every log line is one JSON object (`src/server/logger.ts`) with `level`, `event` and
+`timestamp`; keys that look like secrets are redacted, and payloads, issue bodies, tokens
+and webhook URLs are never logged. On Vercel they appear in the project's runtime logs and
+can be searched by `event` or by a delivery id.
+
+Lines about one event carry `eventId`, `deliveryId` (GitHub's `X-GitHub-Delivery`, also
+shown in the dashboard), `repository` and `attempt`; worker lines carry `jobId`. Steps
+record `durationMs`.
+
+| Stage    | Events                                                                                                                                                                                                                          |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Webhook  | `github_webhook_received`, `github_webhook_rejected` (with reason), `github_webhook_duplicate`, `github_webhook_ignored`, `job_created`                                                                                         |
+| Worker   | `job_started`, `job_succeeded`, `job_retry_scheduled` (delay, error), `job_failed_permanently`, `job_crashed`, `job_lease_lost`                                                                                                 |
+| Rules    | `rules_evaluated` (count), `rule_matched` (one per rule)                                                                                                                                                                        |
+| Steps    | `github_action_succeeded` / `github_action_failed`, `ai_triage_succeeded` / `ai_triage_failed` / `ai_triage_skipped`, `slack_notification_sent` / `slack_notification_skipped` / `slack_notification_failed`, `event_processed` |
+| Triggers | `drain_after_webhook_completed`, `cron_worker_completed`, `drain_after_retry_completed`                                                                                                                                         |
+
+The dashboard is the other half: every failure is persisted with its reason and attempt
+count and shown on the Overview ("Recent failures"), in the Activity filter "Failures",
+and on the event detail page.
 
 ### Deployment
 
@@ -420,13 +490,14 @@ Vercel project settings. Migrations are applied with `npm run db:migrate` agains
 
 ## Security boundaries
 
-| Boundary                  | Control                                                                                           |
-| ------------------------- | ------------------------------------------------------------------------------------------------- |
-| Internet → webhook        | HMAC-SHA256 over raw body, timing-safe compare, header/shape validation, body size cap.           |
-| Internet → auth           | OAuth `state` + PKCE, rate limiting, safe redirects (internal paths only).                        |
-| Browser → API             | Session cookie (HttpOnly, Secure, SameSite=Lax), same-origin `Origin` check on mutations.         |
-| User A → User B's data    | Every query is scoped by `user_id` from the session; IDs from the client are never trusted alone. |
-| Scheduler → worker        | `Authorization: Bearer ${CRON_SECRET}`, timing-safe compare.                                      |
-| App → GitHub/Slack/Gemini | Secrets only in server env vars; tokens encrypted at rest; logs redact secrets.                   |
-| User input → Slack URL    | Allow-list `hooks.slack.com` (prevents SSRF to internal addresses).                               |
-| Rendering                 | React escapes output; no `dangerouslySetInnerHTML`.                                               |
+| Boundary                  | Control                                                                                            |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| Internet → webhook        | HMAC-SHA256 over raw body, timing-safe compare, header/shape validation, body size cap.            |
+| Internet → auth           | OAuth `state` + PKCE, rate limiting, safe redirects (internal paths only).                         |
+| Browser → API             | Session cookie (HttpOnly, Secure, SameSite=Lax), same-origin `Origin` check on mutations.          |
+| User A → User B's data    | Every query is scoped by `user_id` from the session; IDs from the client are never trusted alone.  |
+| Scheduler → worker        | `Authorization: Bearer ${CRON_SECRET}`, timing-safe compare.                                       |
+| App → GitHub/Slack/Gemini | Secrets only in server env vars; tokens encrypted at rest; logs redact secrets.                    |
+| User input → Slack URL    | Allow-list `hooks.slack.com` (prevents SSRF to internal addresses).                                |
+| Rendering                 | React escapes output; no `dangerouslySetInnerHTML`.                                                |
+| Issue text ↔ AI           | Issue text is delimited as untrusted data; AI output is validated, clipped, escaped, display-only. |

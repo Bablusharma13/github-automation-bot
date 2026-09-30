@@ -12,6 +12,7 @@ import { logger } from "../logger";
  *   label/comment that worked is not repeated).
  * - If the GitHub step is retried, the Slack step is reset too (unless the rule had
  *   notifications turned off), so Slack reports the new outcome.
+ * - A failed AI triage is cleared so it runs again (it never blocks the other steps).
  * - The job gets a fresh attempt budget and is due immediately; the caller then drains it.
  * - Refused while the event is being processed (valid lease), so a manual retry cannot
  *   race a running worker.
@@ -35,7 +36,7 @@ export async function retryEvent(db: Db, userId: string, eventId: string): Promi
       .select({ id: automationRuns.id })
       .from(automationRuns)
       .where(and(eq(automationRuns.webhookEventId, eventId), eq(automationRuns.status, "failed")));
-    if (event.status !== "failed" && failedRuns.length === 0) {
+    if (event.status !== "failed" && failedRuns.length === 0 && event.aiStatus !== "failed") {
       throw new AppError(409, "nothing_to_retry", "Nothing to retry: this event has no failed steps.");
     }
 
@@ -61,7 +62,12 @@ export async function retryEvent(db: Db, userId: string, eventId: string): Promi
 
     await tx
       .update(webhookEvents)
-      .set({ status: "processing", errorMessage: null, processedAt: null })
+      .set({
+        status: "processing",
+        errorMessage: null,
+        processedAt: null,
+        ...(event.aiStatus === "failed" ? { aiStatus: null, aiError: null, aiCompletedAt: null } : {}),
+      })
       .where(eq(webhookEvents.id, eventId));
 
     if (job) {

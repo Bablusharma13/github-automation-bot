@@ -13,7 +13,7 @@ import type { Env } from "../env";
 import { logger } from "../logger";
 import { findMatchingRules } from "../rules/match";
 import { describeError, isRetryable } from "./errors";
-import type { Executors, StepContext } from "./executors";
+import type { Executors, StepContext, TriageContext } from "./executors";
 
 export type ProcessInput = { webhookEventId: string; attempt: number; isFinalAttempt: boolean };
 export type ProcessOutcome = { kind: "done" } | { kind: "retry"; error: string };
@@ -28,6 +28,10 @@ async function updateRun(db: Db, id: string, values: Partial<typeof automationRu
   return row!;
 }
 
+/** Added to every log line about an event, so one delivery can be traced end to end. */
+type LogContext = { eventId: string; deliveryId: string; repository: string | null; attempt: number };
+type StepOutcome = { run: AutomationRun; retry: string | null };
+
 /**
  * Processes one webhook event. Safe to call any number of times for the same event:
  *
@@ -36,8 +40,12 @@ async function updateRun(db: Db, id: string, values: Partial<typeof automationRu
  * - Each run has two steps with their own persisted status — GitHub write-back, then the
  *   Slack notification. A step that succeeded is never executed again, so a Slack failure
  *   cannot repeat (or undo) the GitHub action.
+ * - Order: the GitHub steps of all runs, then the optional AI triage (once per event),
+ *   then Slack. The write-back never waits on the AI, and notifications can include it.
  * - Slack waits until the GitHub step is terminal, so the notification reports the real
  *   outcome, including failures.
+ * - AI triage is best-effort: its failure is recorded on the event and never causes a
+ *   retry or blocks the other steps.
  * - Transient failures → { kind: "retry" } (the worker reschedules with backoff). On the
  *   final attempt they are recorded as permanent failures instead.
  */
@@ -48,12 +56,19 @@ export async function processEvent(
   executors: Executors,
   matchRules: RuleMatcher = findMatchingRules,
 ): Promise<ProcessOutcome> {
+  const startedAt = Date.now();
   const [event] = await db
     .select()
     .from(webhookEvents)
     .where(eq(webhookEvents.id, input.webhookEventId))
     .limit(1);
   if (!event || event.status === "processed" || event.status === "ignored") return { kind: "done" };
+  const log: LogContext = {
+    eventId: event.id,
+    deliveryId: event.deliveryId,
+    repository: event.repoFullName,
+    attempt: input.attempt,
+  };
 
   const [repository] = event.repositoryId
     ? await db.select().from(repositories).where(eq(repositories.id, event.repositoryId)).limit(1)
@@ -63,7 +78,7 @@ export async function processEvent(
       .update(webhookEvents)
       .set({ status: "ignored", ignoreReason: "repository_disconnected", processedAt: new Date() })
       .where(eq(webhookEvents.id, event.id));
-    logger.info("event_ignored_at_processing", { eventId: event.id, reason: "repository_disconnected" });
+    logger.info("event_ignored_at_processing", { ...log, reason: "repository_disconnected" });
     return { kind: "done" };
   }
   if (event.status !== "processing") {
@@ -71,7 +86,10 @@ export async function processEvent(
   }
 
   const matched = await matchRules(db, event);
-  logger.info("rules_evaluated", { eventId: event.id, matched: matched.map((r) => r.id) });
+  logger.info("rules_evaluated", { ...log, matched: matched.length });
+  for (const rule of matched) {
+    logger.info("rule_matched", { ...log, ruleId: rule.id, ruleName: rule.name, action: rule.actionType });
+  }
   if (matched.length > 0) {
     await db
       .insert(automationRuns)
@@ -91,11 +109,43 @@ export async function processEvent(
   }
 
   const runs = await db.select().from(automationRuns).where(eq(automationRuns.webhookEventId, event.id));
+  const subject = event.subject;
   let retryError: string | null = null;
-  for (const run of runs) {
-    const ctx: StepContext = { db, env, run, event, subject: event.subject, repository };
-    const error = await advanceRun(ctx, executors, input);
-    if (error && !retryError) retryError = error;
+
+  // 1. GitHub write-back for every unfinished run.
+  const open: AutomationRun[] = [];
+  for (const stored of runs) {
+    if (stored.status === "succeeded" || stored.status === "failed") continue;
+    const run =
+      stored.status === "pending"
+        ? await updateRun(db, stored.id, { status: "running", startedAt: stored.startedAt ?? new Date() })
+        : stored;
+    const step = await runGitHubStep({ db, env, run, event, subject, repository }, executors, input, log);
+    if (step.retry && !retryError) retryError = step.retry;
+    open.push(step.run);
+  }
+
+  // 2. AI triage, at most once per event (a manual retry clears a failed one).
+  let current: WebhookEvent = event;
+  if (event.aiStatus === null && matched.some((rule) => rule.aiTriage)) {
+    current = await runTriageStep({ db, env, event, subject, repository }, executors, log);
+  }
+
+  // 3. Slack, for runs whose GitHub step has a final outcome to report.
+  for (const run of open) {
+    if (run.githubStatus === "pending") continue;
+    const step = await runSlackStep(
+      { db, env, run, event: current, subject, repository },
+      executors,
+      input,
+      log,
+    );
+    if (step.retry) {
+      if (!retryError) retryError = step.retry;
+      continue;
+    }
+    const failed = step.run.githubStatus === "failed" || step.run.slackStatus === "failed";
+    await updateRun(db, run.id, { status: failed ? "failed" : "succeeded", completedAt: new Date() });
   }
   if (retryError) return { kind: "retry", error: retryError };
 
@@ -103,87 +153,147 @@ export async function processEvent(
     .update(webhookEvents)
     .set({ status: "processed", processedAt: new Date(), errorMessage: null })
     .where(eq(webhookEvents.id, event.id));
+  logger.info("event_processed", { ...log, runs: runs.length, durationMs: Date.now() - startedAt });
   return { kind: "done" };
 }
 
-/** Advances one run as far as possible. Returns an error message if it needs a retry. */
-async function advanceRun(
+const gaveUp = (message: string, attempt: number) => `${message} (gave up after ${attempt} attempts)`;
+
+async function runGitHubStep(
   ctx: StepContext,
   executors: Executors,
   input: ProcessInput,
-): Promise<string | null> {
+  log: LogContext,
+): Promise<StepOutcome> {
   const { db } = ctx;
-  let run: AutomationRun = ctx.run;
-  if (run.status === "succeeded" || run.status === "failed") return null;
-  if (run.status === "pending") {
-    run = await updateRun(db, run.id, { status: "running", startedAt: run.startedAt ?? new Date() });
+  let run = ctx.run;
+  if (run.githubStatus !== "pending") return { run, retry: null };
+  const attempts = run.githubAttempts + 1;
+  const startedAt = Date.now();
+  try {
+    const result = await executors.github(ctx);
+    run = await updateRun(db, run.id, {
+      githubStatus: "succeeded",
+      githubAttempts: attempts,
+      githubResult: result,
+      githubError: null,
+    });
+    logger.info("github_action_succeeded", {
+      ...log,
+      runId: run.id,
+      action: run.actionType,
+      result,
+      durationMs: Date.now() - startedAt,
+    });
+    return { run, retry: null };
+  } catch (err) {
+    const message = describeError(err);
+    const retry = isRetryable(err) && !input.isFinalAttempt;
+    run = await updateRun(db, run.id, {
+      githubAttempts: attempts,
+      githubError: retry || !isRetryable(err) ? message : gaveUp(message, input.attempt),
+      ...(retry ? {} : { githubStatus: "failed" as const }),
+    });
+    logger[retry ? "warn" : "error"]("github_action_failed", {
+      ...log,
+      runId: run.id,
+      retryable: retry,
+      error: message,
+      durationMs: Date.now() - startedAt,
+    });
+    // A retryable failure leaves the step pending; Slack waits for the final outcome.
+    return { run, retry: retry ? message : null };
   }
-  const gaveUp = (message: string) => `${message} (gave up after ${input.attempt} attempts)`;
+}
 
-  if (run.githubStatus === "pending") {
-    const attempts = run.githubAttempts + 1;
-    try {
-      const result = await executors.github({ ...ctx, run });
-      run = await updateRun(db, run.id, {
-        githubStatus: "succeeded",
-        githubAttempts: attempts,
-        githubResult: result,
-        githubError: null,
+async function runSlackStep(
+  ctx: StepContext,
+  executors: Executors,
+  input: ProcessInput,
+  log: LogContext,
+): Promise<StepOutcome> {
+  const { db } = ctx;
+  let run = ctx.run;
+  if (run.slackStatus !== "pending") return { run, retry: null };
+  const attempts = run.slackAttempts + 1;
+  const startedAt = Date.now();
+  try {
+    const out = await executors.slack(ctx);
+    run = await updateRun(
+      db,
+      run.id,
+      out.status === "sent"
+        ? { slackStatus: "succeeded", slackAttempts: attempts, slackError: null }
+        : { slackStatus: "skipped", slackAttempts: attempts, slackError: out.reason },
+    );
+    logger.info(out.status === "sent" ? "slack_notification_sent" : "slack_notification_skipped", {
+      ...log,
+      runId: run.id,
+      ...(out.status === "skipped" ? { reason: out.reason } : {}),
+      durationMs: Date.now() - startedAt,
+    });
+    return { run, retry: null };
+  } catch (err) {
+    const message = describeError(err);
+    const retry = isRetryable(err) && !input.isFinalAttempt;
+    run = await updateRun(db, run.id, {
+      slackAttempts: attempts,
+      slackError: retry || !isRetryable(err) ? message : gaveUp(message, input.attempt),
+      ...(retry ? {} : { slackStatus: "failed" as const }),
+    });
+    logger[retry ? "warn" : "error"]("slack_notification_failed", {
+      ...log,
+      runId: run.id,
+      retryable: retry,
+      error: message,
+      durationMs: Date.now() - startedAt,
+    });
+    return { run, retry: retry ? message : null };
+  }
+}
+
+/**
+ * Records the triage outcome on the event and returns the updated row. Never throws for
+ * AI problems: a failed suggestion is shown as failed, and everything else carries on.
+ */
+async function runTriageStep(
+  ctx: TriageContext,
+  executors: Executors,
+  log: LogContext,
+): Promise<WebhookEvent> {
+  const startedAt = Date.now();
+  let values: Pick<typeof webhookEvents.$inferInsert, "aiStatus" | "aiResult" | "aiModel" | "aiError">;
+  try {
+    const out = await executors.triage(ctx);
+    if (out.status === "succeeded") {
+      values = { aiStatus: "succeeded", aiResult: out.result, aiModel: out.model, aiError: null };
+      logger.info("ai_triage_succeeded", {
+        ...log,
+        model: out.model,
+        suggestedLabel: out.result.suggestedLabel,
+        priority: out.result.priority,
+        durationMs: Date.now() - startedAt,
       });
-      logger.info("github_action_succeeded", { runId: run.id, action: run.actionType, result });
-    } catch (err) {
-      const message = describeError(err);
-      const retry = isRetryable(err) && !input.isFinalAttempt;
-      run = await updateRun(db, run.id, {
-        githubAttempts: attempts,
-        githubError: retry || !isRetryable(err) ? message : gaveUp(message),
-        ...(retry ? {} : { githubStatus: "failed" as const }),
-      });
-      logger[retry ? "warn" : "error"]("github_action_failed", {
-        runId: run.id,
-        retryable: retry,
-        error: message,
-      });
-      // Slack waits for a terminal GitHub outcome so the notification is truthful.
-      if (retry) return message;
+    } else {
+      values = { aiStatus: "skipped", aiResult: null, aiModel: null, aiError: out.reason };
+      logger.info("ai_triage_skipped", { ...log, reason: out.reason });
     }
+  } catch (err) {
+    const message = describeError(err);
+    values = { aiStatus: "failed", aiResult: null, aiModel: null, aiError: message };
+    logger.warn("ai_triage_failed", {
+      ...log,
+      retryable: isRetryable(err),
+      error: message,
+      durationMs: Date.now() - startedAt,
+    });
   }
-
-  if (run.slackStatus === "pending") {
-    const attempts = run.slackAttempts + 1;
-    try {
-      const out = await executors.slack({ ...ctx, run });
-      run = await updateRun(
-        db,
-        run.id,
-        out.status === "sent"
-          ? { slackStatus: "succeeded", slackAttempts: attempts, slackError: null }
-          : { slackStatus: "skipped", slackAttempts: attempts, slackError: out.reason },
-      );
-      logger.info(out.status === "sent" ? "slack_notification_sent" : "slack_notification_skipped", {
-        runId: run.id,
-        ...(out.status === "skipped" ? { reason: out.reason } : {}),
-      });
-    } catch (err) {
-      const message = describeError(err);
-      const retry = isRetryable(err) && !input.isFinalAttempt;
-      run = await updateRun(db, run.id, {
-        slackAttempts: attempts,
-        slackError: retry || !isRetryable(err) ? message : gaveUp(message),
-        ...(retry ? {} : { slackStatus: "failed" as const }),
-      });
-      logger[retry ? "warn" : "error"]("slack_notification_failed", {
-        runId: run.id,
-        retryable: retry,
-        error: message,
-      });
-      if (retry) return message;
-    }
-  }
-
-  const failed = run.githubStatus === "failed" || run.slackStatus === "failed";
-  await updateRun(db, run.id, { status: failed ? "failed" : "succeeded", completedAt: new Date() });
-  return null;
+  const [row] = await ctx.db
+    .update(webhookEvents)
+    .set({ ...values, aiCompletedAt: new Date() })
+    .where(eq(webhookEvents.id, ctx.event.id))
+    .returning();
+  return row!;
 }
 
 /**

@@ -3,10 +3,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useState } from "react";
-import type { EventDetailDTO, RunDTO } from "@/lib/activity-types";
+import type { AiTriageDTO, EventDetailDTO, RunDTO } from "@/lib/activity-types";
 import { apiFetch } from "@/lib/api-client";
 import { formatDateTime, timeAgo } from "@/lib/format";
-import { Badge, describeRunAction, eventSummary, StepBadge } from "./activity-status";
+import {
+  Badge,
+  canRetryEvent,
+  describeRunAction,
+  eventSummary,
+  PriorityBadge,
+  StepBadge,
+} from "./activity-status";
 
 function When({ iso, label }: { iso: string | null; label: string }) {
   if (!iso) return null;
@@ -74,6 +81,51 @@ function RunCard({ run }: { run: RunDTO }) {
   );
 }
 
+function AiTriageSection({ ai }: { ai: AiTriageDTO }) {
+  return (
+    <section className="rounded-lg border border-stone-200 bg-white p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-medium">
+          AI triage{" "}
+          <span className="text-xs font-normal text-stone-500">
+            suggestion only — the bot does not act on it
+          </span>
+        </h2>
+        <StepBadge status={ai.status} />
+      </div>
+      {ai.result ? (
+        <>
+          <p className="mt-3 text-sm text-stone-800">{ai.result.summary}</p>
+          <dl className="mt-3 flex flex-wrap gap-x-8 gap-y-2">
+            <div>
+              <dt className="text-xs text-stone-500">Suggested label</dt>
+              <dd className="font-mono text-sm">{ai.result.suggestedLabel}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-stone-500">Priority</dt>
+              <dd className="mt-0.5">
+                <PriorityBadge priority={ai.result.priority} />
+              </dd>
+            </div>
+            {ai.model && (
+              <div>
+                <dt className="text-xs text-stone-500">Model</dt>
+                <dd className="font-mono text-xs">{ai.model}</dd>
+              </div>
+            )}
+          </dl>
+        </>
+      ) : (
+        ai.error && (
+          <p className={`mt-3 text-sm ${ai.status === "failed" ? "text-red-800" : "text-stone-600"}`}>
+            {ai.error}
+          </p>
+        )
+      )}
+    </section>
+  );
+}
+
 export function EventDetail({ id }: { id: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -110,7 +162,7 @@ export function EventDetail({ id }: { id: string }) {
 
   const e = query.data.event;
   const summary = eventSummary(e);
-  const canRetry = e.status === "failed" || e.runs.some((r) => r.status === "failed");
+  const canRetry = canRetryEvent(e);
 
   return (
     <div className="space-y-6">
@@ -195,6 +247,8 @@ export function EventDetail({ id }: { id: string }) {
           </details>
         )}
       </section>
+
+      {e.ai && <AiTriageSection ai={e.ai} />}
 
       {e.job && (
         <section className="rounded-lg border border-stone-200 bg-white p-5">

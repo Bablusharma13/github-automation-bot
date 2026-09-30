@@ -42,6 +42,24 @@ const envSchema = z
           .refine((u) => u.startsWith("https://"), "must be an https:// URL")
           .optional(),
       ),
+    // Optional: enables AI triage suggestions through the Gemini API (free tier). Without
+    // it, rules that ask for AI triage record the step as skipped.
+    GEMINI_API_KEY: z
+      .string()
+      .optional()
+      .transform((v) => (v === "" ? undefined : v)),
+    // Optional model override; the id is interpolated into the request path, so only
+    // plain model ids are accepted.
+    GEMINI_MODEL: z
+      .string()
+      .optional()
+      .transform((v) => (v === "" ? undefined : v))
+      .pipe(
+        z
+          .string()
+          .regex(/^[a-z0-9][a-z0-9.-]{0,63}$/, "must be a Gemini model id, e.g. gemini-3.5-flash-lite")
+          .optional(),
+      ),
   })
   .superRefine((env, ctx) => {
     // Secure cookies are derived from the APP_URL scheme, so production must be HTTPS.

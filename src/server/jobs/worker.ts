@@ -97,6 +97,8 @@ export async function drainJobs(db: Db, env: Env, opts: DrainOptions): Promise<D
         maxAttempts: job.maxAttempts,
       });
 
+      const startedAt = Date.now();
+      const logJob = { jobId: job.id, eventId: job.webhookEventId, attempt: job.attempts };
       let outcome: ProcessOutcome;
       try {
         outcome = await processor({
@@ -106,16 +108,16 @@ export async function drainJobs(db: Db, env: Env, opts: DrainOptions): Promise<D
         });
       } catch (err) {
         outcome = { kind: "retry", error: describeError(err) };
-        logger.error("job_crashed", { jobId: job.id, attempt: job.attempts, error: outcome.error });
+        logger.error("job_crashed", { ...logJob, error: outcome.error });
       }
 
       if (outcome.kind === "done") {
         rescheduledHere.delete(job.id);
         if (await completeJob(db, job)) {
           stats.succeeded++;
-          logger.info("job_succeeded", { jobId: job.id, attempt: job.attempts });
+          logger.info("job_succeeded", { ...logJob, durationMs: Date.now() - startedAt });
         } else {
-          logger.warn("job_lease_lost", { jobId: job.id, attempt: job.attempts });
+          logger.warn("job_lease_lost", logJob);
         }
       } else if (isFinalAttempt) {
         rescheduledHere.delete(job.id);
@@ -127,12 +129,12 @@ export async function drainJobs(db: Db, env: Env, opts: DrainOptions): Promise<D
           );
           stats.failed++;
           logger.error("job_failed_permanently", {
-            jobId: job.id,
-            attempts: job.attempts,
+            ...logJob,
             error: outcome.error,
+            durationMs: Date.now() - startedAt,
           });
         } else {
-          logger.warn("job_lease_lost", { jobId: job.id, attempt: job.attempts });
+          logger.warn("job_lease_lost", logJob);
         }
       } else {
         const delay = backoff(job.attempts);
@@ -140,13 +142,13 @@ export async function drainJobs(db: Db, env: Env, opts: DrainOptions): Promise<D
           rescheduledHere.add(job.id);
           stats.retried++;
           logger.warn("job_retry_scheduled", {
-            jobId: job.id,
-            attempt: job.attempts,
+            ...logJob,
             delaySeconds: delay,
             error: outcome.error,
+            durationMs: Date.now() - startedAt,
           });
         } else {
-          logger.warn("job_lease_lost", { jobId: job.id, attempt: job.attempts });
+          logger.warn("job_lease_lost", logJob);
         }
       }
     }

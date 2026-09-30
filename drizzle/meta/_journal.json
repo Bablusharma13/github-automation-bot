@@ -15,6 +15,13 @@
       "when": 1790694231218,
       "tag": "0001_user_token_refresh",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790771020739,
+      "tag": "0002_ai_triage",
+      "breakpoints": true
     }
   ]
 }
