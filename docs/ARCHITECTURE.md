@@ -290,10 +290,18 @@ safe to repeat:
 
 Step idempotency inside the executors (GitHub/Slack):
 
-- **Add label**: reads current labels on the issue/PR first; if the label is present the
-  step succeeds without a write.
-- **Comment**: the body carries a hidden marker `<!-- automation-bot:run:<run id> -->`.
-  Before posting, existing comments are checked for the marker.
+- **Add label** (`src/server/automation/github-executor.ts`): reads the issue's current
+  labels first (names compared case-insensitively, as GitHub treats them); if present, the
+  step succeeds without a write (`alreadyApplied: true`). Otherwise it looks the label up in
+  the repository's label list and adds it under its canonical name. A label that does not
+  exist is a clear, permanent failure — GitHub's documentation does not say what "add
+  labels" does with unknown names, and a typo in a rule must not silently create labels.
+- **Comment**: the body is the rule's text, a small "Posted automatically by Automation
+  Bot · rule …" footer, and a hidden marker `<!-- github-automation-bot:run:<run id> -->`.
+  Before posting, comments updated since shortly before the run was created (`since=`) are
+  scanned for that marker **by the same GitHub account**; if found, the step succeeds with
+  that comment. A retry after "posted but not recorded" therefore never posts twice, and a
+  marker pasted by someone else cannot suppress the comment.
 - **Slack**: incoming webhooks have no idempotency key, so Slack delivery is
   at-least-once in the narrow window where a POST succeeds but the process dies before
   recording it. Status is written immediately after the POST to keep that window small.
@@ -327,11 +335,18 @@ and value.
 ### GitHub API
 
 A thin typed wrapper around `fetch` against `https://api.github.com`, using the
-connecting user's OAuth token (so writes appear as that user). Every call sets
-`Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2026-03-10` (latest
-supported version; its breaking changes only remove fields this app does not read) and a
-10s timeout, and raises a typed `GitHubApiError` carrying status and whether it is
-retryable (network/timeout, 5xx, 429 and 403-rate-limit are; other 4xx are not).
+connecting user's OAuth token (so writes appear as that user; the comment footer makes the
+automation visible). Every call sets `Accept: application/vnd.github+json`,
+`X-GitHub-Api-Version: 2026-03-10` (latest supported version; its breaking changes only
+remove fields this app does not read) and a 10s timeout, and raises a typed
+`GitHubApiError` carrying status, GitHub's message and validation details, and whether it
+is retryable: network/timeout, 5xx, 429 and rate-limit 403s (primary, `retry-after`, or a
+"secondary rate limit" message) are; other 4xx are not.
+
+Labels and comments on pull requests use the Issues endpoints ("every pull request is an
+issue"). The GitHub step maps failures to actionable messages: 401 → the user is flagged
+for re-authentication; 404 → the issue/PR no longer exists or is inaccessible; 410 →
+issues are disabled; other 403s → denied with GitHub's reason.
 
 ### Slack
 

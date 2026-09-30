@@ -43,10 +43,17 @@ function validationDetails(data: unknown): string[] {
     .slice(0, 5);
 }
 
-function isRateLimited(res: Response): boolean {
+/**
+ * Primary limits: 403/429 with x-ratelimit-remaining: 0. Secondary limits (e.g. creating
+ * comments too quickly) are 403s that may only say so in the message or via retry-after.
+ */
+function isRateLimited(res: Response, githubMessage: string): boolean {
   if (res.status === 429) return true;
   return (
-    res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"))
+    res.status === 403 &&
+    (res.headers.get("x-ratelimit-remaining") === "0" ||
+      res.headers.has("retry-after") ||
+      /rate limit/i.test(githubMessage))
   );
 }
 
@@ -100,7 +107,7 @@ export async function githubRequest<T = unknown>(
         ? data.message.slice(0, 300)
         : res.statusText;
     const details = validationDetails(data);
-    const retryable = res.status >= 500 || isRateLimited(res);
+    const retryable = res.status >= 500 || isRateLimited(res, githubMessage);
     throw new GitHubApiError(
       `GitHub ${method} ${path} → ${res.status}: ${githubMessage}${details.length ? ` (${details.join("; ")})` : ""}`,
       res.status,

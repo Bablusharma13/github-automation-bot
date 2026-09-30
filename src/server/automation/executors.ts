@@ -2,7 +2,7 @@ import "server-only";
 import type { Db } from "../db";
 import type { AutomationRun, EventSubject, GitHubStepResult, Repository, WebhookEvent } from "../db/schema";
 import type { Env } from "../env";
-import { StepError } from "./errors";
+import { executeGitHubAction } from "./github-executor";
 
 export type StepContext = {
   db: Db;
@@ -28,15 +28,14 @@ export type Executors = {
 };
 
 /**
- * Production executors. GitHub write-back and Slack delivery are implemented in the next
- * steps; until then they fail honestly (permanent, visible in the run) instead of
- * pretending to succeed. No rule can be created yet, so production never reaches them.
+ * Production executors. Slack delivery is the next step to be implemented; until then the
+ * Slack step is recorded as skipped with that reason — never reported as sent — so the
+ * run's status reflects the real GitHub outcome.
  */
 export const productionExecutors: Executors = {
-  github: async () => {
-    throw new StepError("GitHub write-back is not available in this build yet.", false);
-  },
-  slack: async () => {
-    throw new StepError("Slack notifications are not available in this build yet.", false);
-  },
+  github: executeGitHubAction,
+  slack: async () => ({
+    status: "skipped",
+    reason: "Slack notifications are not available in this build yet.",
+  }),
 };
