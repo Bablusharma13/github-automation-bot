@@ -79,7 +79,10 @@ repository. Read `docs/ARCHITECTURE.md` before changing structure.
 
 - Vitest. DB-backed tests run against PGlite (in-process Postgres) with the real
   migrations; no external services are called in tests — `fetch` to GitHub/Slack/Gemini
-  is mocked.
+  is mocked with `mockFetch()`. `tests/helpers/setup-env.ts` replaces the global `fetch`
+  with a guard that throws, so a test that forgets its mock fails instead of calling the
+  real API.
+- When mutation-checking a test, assert that the mutation actually changed the code.
 - Every bug fix gets a regression test.
 - Test security properties explicitly (forged signature, cross-user access, duplicates).
 
