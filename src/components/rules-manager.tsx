@@ -32,8 +32,9 @@ type FormState = {
   aiTriage: boolean;
 };
 
-const emptyForm = (repositoryId = ""): FormState => ({
-  repositoryId,
+const emptyForm = (): FormState => ({
+  // Always chosen explicitly (see the RuleForm call below).
+  repositoryId: "",
   name: "Bug issue automation",
   eventType: "issues",
   eventActions: ["opened"],
