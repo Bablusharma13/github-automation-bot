@@ -185,3 +185,40 @@ describe("getUserAccessToken", () => {
     expect(fetchMock.calls).toHaveLength(0);
   });
 });
+
+describe("getUserAccessToken with tokens encrypted under a different key", () => {
+  const otherKey = Buffer.alloc(32, 9).toString("base64");
+
+  it("asks for re-authentication instead of failing generically when the access token cannot be decrypted", async () => {
+    const fetchMock = mockFetch({});
+    const [u] = await db
+      .insert(users)
+      .values({
+        githubUserId: ++githubId,
+        githubLogin: `other-key-${githubId}`,
+        accessTokenEnc: encryptSecret("gho_from_other_env", otherKey),
+      })
+      .returning();
+
+    await expect(getUserAccessToken(db, env, u!.id)).rejects.toBeInstanceOf(GitHubReauthRequiredError);
+    expect((await reload(u!.id)).githubReauthRequiredAt).not.toBeNull();
+    expect(fetchMock.calls).toHaveLength(0);
+  });
+
+  it("does the same when an expiring token's refresh token cannot be decrypted", async () => {
+    const fetchMock = mockFetch({});
+    const [u] = await db
+      .insert(users)
+      .values({
+        githubUserId: ++githubId,
+        githubLogin: `other-key-refresh-${githubId}`,
+        accessTokenEnc: encryptSecret("ghu_expired", env.TOKEN_ENCRYPTION_KEY),
+        accessTokenExpiresAt: new Date(Date.now() - 1000),
+        refreshTokenEnc: encryptSecret("ghr_from_other_env", otherKey),
+      })
+      .returning();
+
+    await expect(getUserAccessToken(db, env, u!.id)).rejects.toBeInstanceOf(GitHubReauthRequiredError);
+    expect(fetchMock.calls).toHaveLength(0);
+  });
+});

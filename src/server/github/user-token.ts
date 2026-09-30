@@ -59,14 +59,48 @@ export async function markGitHubReauthRequired(db: Db, userId: string, reason: s
  * token the first one stored.
  */
 export async function getUserAccessToken(db: Db, env: Env, userId: string): Promise<string> {
+  const outcome = await resolveToken(db, env, userId);
+  if ("token" in outcome) return outcome.token;
+  // Flag outside the transaction so the flag survives even though no token was produced.
+  if (outcome.reauth !== "already_flagged") {
+    try {
+      await markGitHubReauthRequired(db, userId, outcome.reauth);
+    } catch (err) {
+      logger.error("github_reauth_flag_failed", { userId, error: serializeError(err) });
+    }
+  }
+  throw new GitHubReauthRequiredError();
+}
+
+type Outcome = { token: string } | { reauth: string };
+
+/**
+ * A stored token that no longer decrypts (TOKEN_ENCRYPTION_KEY rotated, or the row was
+ * written by an environment with a different key) is unusable, just like a revoked one.
+ * Treating it as "sign in again" lets the next login re-encrypt it with the current key,
+ * instead of every GitHub call failing with a generic error.
+ */
+function tryDecrypt(payload: string, key: string): string | null {
+  try {
+    return decryptSecret(payload, key);
+  } catch {
+    return null;
+  }
+}
+
+function fromStored(payload: string, key: string): Outcome {
+  const token = tryDecrypt(payload, key);
+  return token === null ? { reauth: "stored_token_unreadable" } : { token };
+}
+
+async function resolveToken(db: Db, env: Env, userId: string): Promise<Outcome> {
   const key = env.TOKEN_ENCRYPTION_KEY;
   const [row] = await db.select(tokenColumns).from(users).where(eq(users.id, userId)).limit(1);
   if (!row) throw new Error(`User ${userId} not found`);
-  if (row.githubReauthRequiredAt) throw new GitHubReauthRequiredError();
-  if (isFresh(row, Date.now())) return decryptSecret(row.accessTokenEnc, key);
+  if (row.githubReauthRequiredAt) return { reauth: "already_flagged" };
+  if (isFresh(row, Date.now())) return fromStored(row.accessTokenEnc, key);
 
-  type Outcome = { token: string } | { reauth: string };
-  const outcome: Outcome = await db.transaction(async (tx) => {
+  return db.transaction(async (tx): Promise<Outcome> => {
     const [locked] = await tx
       .select(tokenColumns)
       .from(users)
@@ -76,23 +110,26 @@ export async function getUserAccessToken(db: Db, env: Env, userId: string): Prom
     if (!locked) throw new Error(`User ${userId} not found`);
     if (locked.githubReauthRequiredAt) return { reauth: "already_flagged" };
     // Another worker refreshed while we waited for the lock.
-    if (isFresh(locked, Date.now())) return { token: decryptSecret(locked.accessTokenEnc, key) };
+    if (isFresh(locked, Date.now())) return fromStored(locked.accessTokenEnc, key);
 
     if (!locked.refreshTokenEnc) return { reauth: "access_token_expired_without_refresh_token" };
     if (locked.refreshTokenExpiresAt && locked.refreshTokenExpiresAt.getTime() <= Date.now()) {
       return { reauth: "refresh_token_expired" };
     }
+    const refreshToken = tryDecrypt(locked.refreshTokenEnc, key);
+    if (refreshToken === null) return { reauth: "stored_token_unreadable" };
 
     let tokens;
     try {
       tokens = await refreshAccessToken({
         clientId: env.GITHUB_CLIENT_ID,
         clientSecret: env.GITHUB_CLIENT_SECRET,
-        refreshToken: decryptSecret(locked.refreshTokenEnc, key),
+        refreshToken,
       });
     } catch (err) {
-      if (err instanceof OAuthError && err.code === "bad_refresh_token")
+      if (err instanceof OAuthError && err.code === "bad_refresh_token") {
         return { reauth: "bad_refresh_token" };
+      }
       // Transient failures (network, GitHub 5xx) and config errors propagate; the stored
       // tokens are untouched so a later retry can still succeed.
       throw err;
@@ -116,15 +153,4 @@ export async function getUserAccessToken(db: Db, env: Env, userId: string): Prom
     logger.info("github_token_refreshed", { userId, expiresAt: tokens.accessTokenExpiresAt?.toISOString() });
     return { token: tokens.accessToken };
   });
-
-  if ("token" in outcome) return outcome.token;
-  // Flag outside the transaction so the flag survives even though no token was produced.
-  if (outcome.reauth !== "already_flagged") {
-    try {
-      await markGitHubReauthRequired(db, userId, outcome.reauth);
-    } catch (err) {
-      logger.error("github_reauth_flag_failed", { userId, error: serializeError(err) });
-    }
-  }
-  throw new GitHubReauthRequiredError();
 }
