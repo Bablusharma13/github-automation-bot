@@ -9,7 +9,9 @@ name: Worker sweep
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # Every 5 minutes starting at minute 2: GitHub documents that the start of every hour
+    # is a high-load time when scheduled runs are delayed or dropped.
+    - cron: "2/5 * * * *"
   workflow_dispatch:
 
 permissions: {}
