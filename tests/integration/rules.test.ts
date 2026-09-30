@@ -115,6 +115,18 @@ describe("POST /api/rules", () => {
     expect(await db.select().from(rules).where(eq(rules.userId, o.user.id))).toHaveLength(0);
   });
 
+  it("never picks a repository for the caller, even when only one is connected", async () => {
+    // Regression guard for the wrong-repository incident (7516002): the repository must be
+    // chosen explicitly; the server has no default.
+    const o = await newOwner(); // exactly one connected repository
+    const withoutRepository: Record<string, unknown> = validRule(o.repo.id);
+    delete withoutRepository.repositoryId;
+    const res = await create(o.cookie, withoutRepository);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe("invalid_input");
+    expect(await db.select().from(rules).where(eq(rules.userId, o.user.id))).toHaveLength(0);
+  });
+
   it("accepts a comment rule with a longer body and no keywords", async () => {
     const o = await newOwner();
     const rule = await createOk(

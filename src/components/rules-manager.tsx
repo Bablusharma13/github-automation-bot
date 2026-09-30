@@ -411,10 +411,10 @@ export function RulesManager() {
         </p>
       ) : editing === "new" ? (
         <RuleForm
-          // Pre-select only when there is exactly one repository. With several, the user
-          // must choose explicitly (a silently pre-selected repo caused a rule to be
-          // created on the wrong repository in real use).
-          initial={emptyForm(connected.length === 1 ? connected[0]!.id : "")}
+          // Never pre-select a repository, even when only one is connected: a silently
+          // pre-selected repository once caused a rule to be created on the wrong
+          // repository in real use. The `required` select blocks submitting without one.
+          initial={emptyForm()}
           repositories={connected}
           mode="create"
           aiAvailable={aiAvailable}
