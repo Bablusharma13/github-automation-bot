@@ -16,5 +16,10 @@ export default defineConfig({
     // PGlite instances are per-file; keep files isolated.
     pool: "forks",
     testTimeout: 20_000,
+    // Each DB-backed file boots an in-process Postgres (PGlite/WASM) and runs the
+    // migrations in beforeAll. With ~16 files starting at once this exceeded the default
+    // 10s hook timeout on a 12-core machine, so allow more time and cap parallelism.
+    hookTimeout: 60_000,
+    maxWorkers: "50%",
   },
 });
