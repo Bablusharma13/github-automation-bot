@@ -205,16 +205,36 @@ webhook secret, and our API never exposes it.
 
 ### Webhook flow
 
-See the diagram. Key properties:
+`POST /api/webhooks/github` → `ingestGitHubDelivery()` (`src/server/webhooks/ingest.ts`).
+Checks run in this order, and nothing is parsed or stored before the signature verifies:
 
-- Signature is computed over the **raw bytes** of the body before any JSON parsing and
-  compared with `crypto.timingSafeEqual`.
-- Forged/malformed requests are rejected before touching the database.
-- Idempotency: `delivery_id` (from `X-GitHub-Delivery`) is UNIQUE. The insert uses
-  `ON CONFLICT DO NOTHING`, so two concurrent deliveries of the same id cannot both
-  create a job — the database arbitrates the race, not application code.
-- Events for repositories that are not connected/active are recorded as `ignored`.
-- Unsupported event types (e.g. `ping`) are acknowledged and not processed.
+| Step                                                                         | Failure → response      |
+| ---------------------------------------------------------------------------- | ----------------------- |
+| Body ≤ 2 MB (declared `Content-Length` first, then actual bytes)             | 413                     |
+| `X-Hub-Signature-256` present                                                | 401 `missing_signature` |
+| `sha256=` + HMAC-SHA256(secret, **raw bytes**), constant-time compare        | 401 `invalid_signature` |
+| `X-GitHub-Delivery` (GUID-like) and `X-GitHub-Event` present and well-formed | 400                     |
+| `Content-Type: application/json`                                             | 415                     |
+| JSON parses; `issues`/`pull_request` payloads have the fields we need (Zod)  | 400 `malformed_payload` |
+
+Then, in ONE transaction: insert the `webhook_events` row
+(`ON CONFLICT (delivery_id) DO NOTHING`) and, for deliveries we act on, its `jobs` row.
+Responses: 202 `queued`, 200 `ignored` (with reason), 200 `duplicate`, 500 if the
+database write failed (never a 2xx for something we did not store).
+
+- Idempotency: `delivery_id` is UNIQUE, so a redelivery — or two concurrent copies of
+  the same delivery — produces one event and one job; the database arbitrates the race.
+- Ignore reasons (event recorded, no job): `ping` (sent when the hook is created),
+  `unsupported_event`, `repository_not_connected` (no subject content is kept for these),
+  and `unknown_hook` — only the hook id we installed (`X-GitHub-Hook-ID` =
+  `repositories.webhook_id`) may trigger automation. A second hook with our URL would
+  otherwise deliver every event twice under different delivery ids.
+- Stored subject: kind, number, title, body (first 10,000 chars), URL, state, author,
+  labels. The full payload is not stored.
+- Rate limiting: deliberately none on this endpoint. The HMAC check is cheap and happens
+  before any database access; a database-backed limiter would add a write for every
+  forged request and could throttle legitimate GitHub bursts. Vercel's platform DDoS
+  mitigation still applies.
 
 ### Reliable processing
 
