@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const LINKS = [
   { href: "/dashboard", label: "Overview" },
+  { href: "/dashboard/activity", label: "Activity" },
   { href: "/dashboard/repositories", label: "Repositories" },
   { href: "/dashboard/rules", label: "Rules" },
   { href: "/dashboard/settings", label: "Settings" },
@@ -15,7 +16,9 @@ export function DashboardNav() {
   return (
     <nav aria-label="Dashboard" className="flex gap-1">
       {LINKS.map((link) => {
-        const active = pathname === link.href;
+        // Sub-pages (e.g. /dashboard/activity/<id>) keep their section highlighted.
+        const active =
+          pathname === link.href || (link.href !== "/dashboard" && pathname.startsWith(`${link.href}/`));
         return (
           <Link
             key={link.href}

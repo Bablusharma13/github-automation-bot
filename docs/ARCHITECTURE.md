@@ -376,6 +376,36 @@ API: `GET /api/settings/slack` (source: `user` | `default` | `none`),
 `PUT /api/settings/slack { webhookUrl }`, `DELETE /api/settings/slack`, and
 `POST /api/settings/slack/test` (sends a real test message; 5 per minute per user).
 
+### Dashboard
+
+Pages (each calls `requireUser()`; data comes from the APIs below, which scope every query
+by the session user and answer 404 for other users' ids):
+
+- **Overview** `/dashboard`: stat cards (connected repositories, enabled rules, events
+  received total/24 h, successful actions, failed runs, retries pending), recent activity,
+  recent failures (step, reason, attempt count, time), connected repositories.
+- **Activity** `/dashboard/activity`: table — time, repository, event, actor, title,
+  rule → action, GitHub step, Slack step, status — with filters (all / failures / in
+  progress) and cursor pagination. Status is explicit about "No rule matched",
+  "Retrying (n/6) · next attempt in …", "Completed with failures".
+- **Event detail** `/dashboard/activity/[id]`: delivery (repository, event, actor,
+  delivery id, labels, body preview, timestamps), processing (job status, attempts, next
+  attempt, last error), and each matched rule's GitHub and Slack steps with attempts and
+  errors. "Retry failed steps" is shown when something failed.
+- **Repositories**, **Rules**, **Settings** (Slack) as described above.
+
+Live updates are TanStack Query polling (activity every 5 s, stats/failures every 10 s,
+an in-progress event every 3 s). Polling pauses while the tab is hidden. No WebSockets:
+polling is enough at this scale and works on serverless without extra infrastructure.
+
+API: `GET /api/events?limit=&before=&filter=`, `GET /api/events/:id`, `GET /api/stats`,
+`POST /api/events/:id/retry`. A manual retry (`src/server/events/retry.ts`) runs in a
+transaction with the event and job rows locked: it resets only failed steps (a Slack
+failure never repeats a successful GitHub action; a retried GitHub step also re-sends
+Slack so the new outcome is reported), gives the job a fresh attempt budget, refuses
+(409) while the job holds a valid lease or when nothing failed, and then drains the queue
+in `after()`.
+
 ### Optional AI
 
 After core flow works: Gemini generates a short summary, a suggested category and a
